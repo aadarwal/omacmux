@@ -20,13 +20,58 @@ The installer will:
 
 Open a **new Ghostty window** after install.
 
+## Session Management
+
+| Command | Description |
+|---------|-------------|
+| `t` | Attach last session / create "Work" (outside tmux) or fzf session picker (inside tmux) |
+| `t <name>` | Attach or create a named session |
+| `t <name> <dir>` | Create named session rooted at directory |
+| `t .` | Session named after current git repo |
+| `tn <name> [dir]` | Create new named session (errors if exists) |
+| `tp` | fzf session picker with live preview and inline kill (`ctrl-x`) |
+| `tj [query]` | Jump to project directory (zoxide + fzf), create/attach session |
+| `tk [name]` | Kill session (current if no arg) |
+| `tl` | List all sessions |
+
+### Examples
+
+```bash
+t                  # attach to last session or create "Work"
+t myapp            # attach to "myapp" or create it
+t myapp ~/code/app # create "myapp" rooted at ~/code/app
+t .                # session named after git repo root
+tj                 # fzf pick from all known project directories
+tj myapp           # jump to zoxide-matched "myapp" directory
+tk                 # kill current session
+tk myapp           # kill "myapp" session
+```
+
+## Window Management
+
+| Command | Description |
+|---------|-------------|
+| `tw <name> [cmd] [dir]` | Create named window, optionally run a command |
+| `twp` | fzf window picker with live preview |
+| `to [cmd]` | Popup overlay/scratchpad (tmux popup) |
+
+### Examples
+
+```bash
+tw server "rails server"     # window named "server" running rails
+tw logs "tail -f log/dev.log"
+twp                          # pick a window with fzf
+to                           # popup scratchpad shell
+to htop                      # popup running htop
+```
+
 ## Layout Commands
 
-All commands run inside tmux. Start tmux first with `t`.
+All layout commands run inside tmux.
 
 ### `tdl <ai> [ai2]` - Dev Layout
 
-Creates a 3-pane development layout:
+Creates a 3-pane development layout. Proportions configurable via `TDL_AI_WIDTH` (default 30) and `TDL_TERMINAL_HEIGHT` (default 15) environment variables.
 
 ```
 ┌──────────────────────┬─────────────┐
@@ -69,9 +114,65 @@ tsl 4 cx   # 4 tiled panes, each running claude
 tsl 4 cxx  # 4 tiled panes, each running claude (full permissions skip)
 ```
 
-### `t` - Quick tmux
+### `tpl [dir]` - Pair Layout
 
-Attaches to existing tmux session or creates a new "Work" session.
+Two editors side by side with a terminal at bottom:
+
+```
+┌───────────────────┬───────────────────┐
+│                   │                   │
+│   nvim (50%)      │   nvim (50%)      │
+│                   │                   │
+├───────────────────┴───────────────────┤
+│           terminal (15%)              │
+└───────────────────────────────────────┘
+```
+
+### `tml <cmd1> [cmd2] ...` - Monitor Layout
+
+Main pane on left with stacked command panes on the right:
+
+```bash
+tml "tail -f log/dev.log" "docker stats" "htop"
+```
+
+```
+┌───────────────────────┬──────────────┐
+│                       │ tail -f ...  │
+│    main terminal      ├──────────────┤
+│       (70%)           │ docker stats │
+│                       ├──────────────┤
+│                       │    htop      │
+└───────────────────────┴──────────────┘
+```
+
+## Session Persistence
+
+| Command | Description |
+|---------|-------------|
+| `tss [name]` | Save current tmux state (all session/window/pane directories) |
+| `tsr [name]` | Restore session layout from a save file |
+
+```bash
+tss              # save as "default"
+tss work-friday  # save as "work-friday"
+tsr              # restore "default"
+tsr work-friday  # restore "work-friday"
+```
+
+Saves are stored in `~/.local/share/omacmux/sessions/`. Restores the directory skeleton (sessions, windows, panes with correct working directories) but not running processes.
+
+## Workspace Configs
+
+Create a `.tmux-workspace` file in any project directory. When `t` creates a new session in that directory, it sources the file automatically.
+
+```bash
+# Example .tmux-workspace for a Rails project
+tdl cx
+tw server "rails server"
+tw logs "tail -f log/development.log"
+tmux select-window -t :1
+```
 
 ## Tmux Keybindings
 
@@ -96,14 +197,18 @@ Attaches to existing tmux session or creates a new "Work" session.
 | `r` | Rename window |
 | `C` | New session |
 | `K` | Kill session |
+| `R` | Rename session |
 | `d` | Detach (reattach with `t`) |
 | `q` | Reload tmux config |
+| `s` | Session picker (fzf popup) |
+| `w` | Window picker (fzf popup) |
+| `j` | Project jump (fzf popup) |
+| `` ` `` | Scratchpad popup |
 
 ## Tool Aliases
 
 | Alias | Command |
 |-------|---------|
-| `t` | `tmux attach \|\| tmux new -s Work` |
 | `c` | `opencode` |
 | `cx` | `claude` (with permissions skip) |
 | `cxx` | `claude` (with full permissions skip) |

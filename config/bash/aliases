@@ -33,7 +33,7 @@ alias cx='printf "\033[2J\033[3J\033[H" && claude --allow-dangerously-skip-permi
 alias cxx='printf "\033[2J\033[3J\033[H" && claude --dangerously-skip-permissions'
 alias d='docker'
 alias r='rails'
-alias t='tmux attach || tmux new -s Work'
+unalias t 2>/dev/null
 n() { if [ "$#" -eq 0 ]; then command nvim . ; else command nvim "$@"; fi; }
 
 # Git

@@ -1,5 +1,207 @@
-# Create a Tmux Dev Layout with editor, ai, and terminal
-# Usage: tdl <c|cx|codex|other_ai> [<second_ai>]
+# ==============================================================================
+# Session Management
+# ==============================================================================
+
+# Smart tmux entry point
+# Usage:
+#   t            -> outside tmux: attach last session or create "Work"
+#                -> inside tmux: fzf session picker
+#   t <name>     -> attach/switch to session, or create it
+#   t <name> <dir> -> create session rooted at directory
+#   t .          -> session named after current git repo (or directory)
+t() {
+  local name="$1"
+  local dir="$2"
+
+  # No arguments
+  if [[ -z $name ]]; then
+    if [[ -n $TMUX ]]; then
+      tp
+      return
+    fi
+    tmux attach 2>/dev/null || tmux new-session -s Work
+    return
+  fi
+
+  # "t ." -- use git root or current dir as session name
+  if [[ $name == "." ]]; then
+    local root
+    root=$(git rev-parse --show-toplevel 2>/dev/null) || root="$PWD"
+    name=$(basename "$root" | tr '.:' '--')
+    dir="$root"
+  fi
+
+  # Resolve directory (support zoxide fuzzy matching)
+  if [[ -n $dir && ! -d $dir ]] && command -v zoxide &>/dev/null; then
+    dir=$(zoxide query -- "$dir" 2>/dev/null) || { echo "Directory not found: $2"; return 1; }
+  fi
+
+  # If session exists, attach/switch to it
+  if tmux has-session -t "=$name" 2>/dev/null; then
+    if [[ -n $TMUX ]]; then
+      tmux switch-client -t "=$name"
+    else
+      tmux attach-session -t "=$name"
+    fi
+    return
+  fi
+
+  # Create new session
+  local new_dir="${dir:-$PWD}"
+  if [[ -n $TMUX ]]; then
+    tmux new-session -d -s "$name" -c "$new_dir"
+    tmux switch-client -t "=$name"
+  else
+    tmux new-session -s "$name" -c "$new_dir"
+  fi
+
+  # Source workspace config if present
+  if [[ -f "$new_dir/.tmux-workspace" ]]; then
+    source "$new_dir/.tmux-workspace"
+  fi
+}
+
+# Create a new named session (errors if it already exists)
+# Usage: tn <name> [directory]
+tn() {
+  local name="$1"
+  local dir="${2:-$PWD}"
+
+  [[ -z $name ]] && { echo "Usage: tn <name> [directory]"; return 1; }
+
+  if tmux has-session -t "=$name" 2>/dev/null; then
+    echo "Session '$name' already exists. Use 't $name' to switch."
+    return 1
+  fi
+
+  if [[ -n $TMUX ]]; then
+    tmux new-session -d -s "$name" -c "$dir"
+    tmux switch-client -t "=$name"
+  else
+    tmux new-session -s "$name" -c "$dir"
+  fi
+}
+
+# Kill a tmux session (current session if no argument)
+# Usage: tk [session_name]
+tk() {
+  local name="${1:-$(tmux display-message -p '#S' 2>/dev/null)}"
+  [[ -z $name ]] && { echo "Usage: tk [session_name]"; return 1; }
+  tmux kill-session -t "=$name" 2>/dev/null && echo "Killed session '$name'" || echo "Session '$name' not found."
+}
+
+# List all tmux sessions
+tl() {
+  tmux list-sessions 2>/dev/null || echo "No tmux sessions running."
+}
+
+# fzf session picker/switcher
+# Inside tmux: switch session. Outside: attach. ctrl-x to kill inline.
+tp() {
+  [[ -z $(tmux list-sessions 2>/dev/null) ]] && { echo "No tmux sessions."; return 1; }
+
+  local fmt='#{session_name}: #{session_windows} windows#{?session_attached, (attached),}'
+  local selected
+  selected=$(tmux list-sessions -F "$fmt" | fzf --tmux 60%,40% \
+    --header "ctrl-x: kill  enter: switch" \
+    --bind "ctrl-x:execute-silent(tmux kill-session -t {1})+reload:tmux list-sessions -F \"$fmt\" 2>/dev/null || true" \
+    --delimiter ":" \
+    --preview "tmux capture-pane -e -p -t {1}:" \
+    --preview-window "right:60%") || return 0
+
+  local session_name="${selected%%:*}"
+
+  if [[ -n $TMUX ]]; then
+    tmux switch-client -t "=$session_name"
+  else
+    tmux attach-session -t "=$session_name"
+  fi
+}
+
+# ==============================================================================
+# Project Awareness
+# ==============================================================================
+
+# Jump to a project directory: fzf pick from zoxide, create/attach session
+# Usage: tj [query]
+tj() {
+  local query="$1"
+  local selected
+
+  if ! command -v zoxide &>/dev/null; then
+    echo "tj requires zoxide."
+    return 1
+  fi
+
+  if [[ -n $query ]]; then
+    selected=$(zoxide query -- "$query" 2>/dev/null)
+  else
+    selected=$(zoxide query -l 2>/dev/null | fzf --tmux 70%,50% \
+      --header "Pick a project directory" \
+      --preview "ls -la {}" \
+      --scheme path) || return 0
+  fi
+
+  [[ -z $selected ]] && { echo "No directory selected."; return 1; }
+
+  local name
+  name=$(basename "$selected" | tr '.:' '--')
+
+  t "$name" "$selected"
+}
+
+# ==============================================================================
+# Window Management
+# ==============================================================================
+
+# Create a named window (optionally with a command and directory)
+# Usage: tw <name> [command] [directory]
+tw() {
+  local name="$1"
+  local cmd="$2"
+  local dir="${3:-$(tmux display-message -p '#{pane_current_path}' 2>/dev/null)}"
+
+  [[ -z $TMUX ]] && { echo "tw requires tmux."; return 1; }
+  [[ -z $name ]] && { echo "Usage: tw <name> [command] [directory]"; return 1; }
+
+  local pane_id
+  pane_id=$(tmux new-window -c "${dir:-$PWD}" -n "$name" -P -F '#{pane_id}')
+
+  if [[ -n $cmd ]]; then
+    tmux send-keys -t "$pane_id" "$cmd" C-m
+  fi
+}
+
+# fzf window picker
+twp() {
+  [[ -z $TMUX ]] && { echo "twp requires tmux."; return 1; }
+
+  local fmt="#{window_index}: #{window_name} (#{window_panes} panes)#{?window_active, *,}"
+  local selected
+  selected=$(tmux list-windows -F "$fmt" | fzf --tmux 50%,40% \
+    --header "Pick a window" \
+    --preview "tmux capture-pane -e -p -t :{1}" \
+    --delimiter ":") || return 0
+
+  local idx="${selected%%:*}"
+  tmux select-window -t ":$idx"
+}
+
+# Popup overlay/scratchpad
+# Usage: to [command]
+to() {
+  [[ -z $TMUX ]] && { echo "to requires tmux."; return 1; }
+  local cmd="${1:-$SHELL}"
+  tmux display-popup -E -w 80% -h 75% -d "#{pane_current_path}" "$cmd"
+}
+
+# ==============================================================================
+# Layouts
+# ==============================================================================
+
+# Dev Layout: editor + AI + terminal
+# Usage: tdl <ai> [<second_ai>]
+# Proportions configurable via TDL_AI_WIDTH (default 30) and TDL_TERMINAL_HEIGHT (default 15)
 tdl() {
   [[ -z $1 ]] && { echo "Usage: tdl <c|cx|codex|other_ai> [<second_ai>]"; return 1; }
   [[ -z $TMUX ]] && { echo "You must start tmux to use tdl."; return 1; }
@@ -8,37 +210,32 @@ tdl() {
   local editor_pane ai_pane ai2_pane
   local ai="$1"
   local ai2="$2"
+  local ai_width="${TDL_AI_WIDTH:-30}"
+  local terminal_height="${TDL_TERMINAL_HEIGHT:-15}"
 
-  # Use TMUX_PANE for the pane we're running in (stable even if active window changes)
   editor_pane="$TMUX_PANE"
 
-  # Name the current window after the base directory name
   tmux rename-window -t "$editor_pane" "$(basename "$current_dir")"
 
-  # Split window vertically - top 85%, bottom 15% (target editor pane explicitly)
-  tmux split-window -v -p 15 -t "$editor_pane" -c "$current_dir"
+  # Bottom terminal
+  tmux split-window -v -p "$terminal_height" -t "$editor_pane" -c "$current_dir"
 
-  # Split editor pane horizontally - AI on right 30% (capture new pane ID directly)
-  ai_pane=$(tmux split-window -h -p 30 -t "$editor_pane" -c "$current_dir" -P -F '#{pane_id}')
+  # AI on right
+  ai_pane=$(tmux split-window -h -p "$ai_width" -t "$editor_pane" -c "$current_dir" -P -F '#{pane_id}')
 
-  # If second AI provided, split the AI pane vertically
+  # Optional second AI
   if [[ -n $ai2 ]]; then
     ai2_pane=$(tmux split-window -v -t "$ai_pane" -c "$current_dir" -P -F '#{pane_id}')
     tmux send-keys -t "$ai2_pane" "$ai2" C-m
   fi
 
-  # Run ai in the right pane
   tmux send-keys -t "$ai_pane" "$ai" C-m
-
-  # Run nvim in the left pane
   tmux send-keys -t "$editor_pane" "$EDITOR ." C-m
-
-  # Select the nvim pane for focus
   tmux select-pane -t "$editor_pane"
 }
 
-# Create multiple tdl windows with one per subdirectory in the current directory
-# Usage: tdlm <c|cx|codex|other_ai> [<second_ai>]
+# Multi-project Dev Layout: one tdl window per subdirectory
+# Usage: tdlm <ai> [<second_ai>]
 tdlm() {
   [[ -z $1 ]] && { echo "Usage: tdlm <c|cx|codex|other_ai> [<second_ai>]"; return 1; }
   [[ -z $TMUX ]] && { echo "You must start tmux to use tdlm."; return 1; }
@@ -48,7 +245,6 @@ tdlm() {
   local base_dir="$PWD"
   local first=true
 
-  # Rename the session to the current directory name (replace dots/colons which tmux disallows)
   tmux rename-session "$(basename "$base_dir" | tr '.:' '--')"
 
   for dir in "$base_dir"/*/; do
@@ -56,7 +252,6 @@ tdlm() {
     local dirpath="${dir%/}"
 
     if $first; then
-      # Reuse the current window for the first project
       tmux send-keys -t "$TMUX_PANE" "cd '$dirpath' && tdl $ai $ai2" C-m
       first=false
     else
@@ -66,7 +261,7 @@ tdlm() {
   done
 }
 
-# Create a multi-pane swarm layout with the same command started in each pane (great for AI)
+# Swarm Layout: N tiled panes all running the same command
 # Usage: tsl <pane_count> <command>
 tsl() {
   [[ -z $1 || -z $2 ]] && { echo "Usage: tsl <pane_count> <command>"; return 1; }
@@ -94,4 +289,112 @@ tsl() {
   done
 
   tmux select-pane -t "${panes[0]}"
+}
+
+# Pair Layout: two editors side by side + terminal at bottom
+# Usage: tpl [directory]
+tpl() {
+  [[ -z $TMUX ]] && { echo "tpl requires tmux."; return 1; }
+
+  local dir="${1:-$PWD}"
+  local main_pane="$TMUX_PANE"
+
+  tmux rename-window -t "$main_pane" "$(basename "$dir")"
+
+  # Bottom terminal 15%
+  tmux split-window -v -p 15 -t "$main_pane" -c "$dir"
+
+  # Right editor 50%
+  local right_pane
+  right_pane=$(tmux split-window -h -p 50 -t "$main_pane" -c "$dir" -P -F '#{pane_id}')
+
+  tmux send-keys -t "$main_pane" "$EDITOR ." C-m
+  tmux send-keys -t "$right_pane" "$EDITOR ." C-m
+  tmux select-pane -t "$main_pane"
+}
+
+# Monitor Layout: main pane left + stacked command panes on right
+# Usage: tml <cmd1> [cmd2] [cmd3] ...
+tml() {
+  [[ $# -eq 0 ]] && { echo "Usage: tml <cmd1> [cmd2] [cmd3] ..."; return 1; }
+  [[ -z $TMUX ]] && { echo "tml requires tmux."; return 1; }
+
+  local dir="$PWD"
+  local main_pane="$TMUX_PANE"
+
+  tmux rename-window -t "$main_pane" "$(basename "$dir")"
+
+  # First command gets a right pane at 30%
+  local side_pane
+  side_pane=$(tmux split-window -h -p 30 -t "$main_pane" -c "$dir" -P -F '#{pane_id}')
+  tmux send-keys -t "$side_pane" "$1" C-m
+  shift
+
+  # Remaining commands stack vertically in the right column
+  local prev="$side_pane"
+  for cmd in "$@"; do
+    local new_pane
+    new_pane=$(tmux split-window -v -t "$prev" -c "$dir" -P -F '#{pane_id}')
+    tmux send-keys -t "$new_pane" "$cmd" C-m
+    prev="$new_pane"
+  done
+
+  tmux select-pane -t "$main_pane"
+}
+
+# ==============================================================================
+# Persistence
+# ==============================================================================
+
+# Save current tmux state (session/window/pane directories)
+# Usage: tss [name]
+tss() {
+  local save_name="${1:-default}"
+  local save_dir="$HOME/.local/share/omacmux/sessions"
+  local save_file="$save_dir/$save_name.tsv"
+
+  mkdir -p "$save_dir"
+
+  tmux list-panes -a -F "#{session_name}	#{window_index}	#{window_name}	#{pane_index}	#{pane_current_path}	#{pane_current_command}" > "$save_file"
+
+  echo "Saved tmux state to $save_file ($(wc -l < "$save_file" | tr -d ' ') panes)"
+}
+
+# Restore tmux state from a save file
+# Usage: tsr [name]
+tsr() {
+  local save_name="${1:-default}"
+  local save_dir="$HOME/.local/share/omacmux/sessions"
+  local save_file="$save_dir/$save_name.tsv"
+
+  [[ ! -f $save_file ]] && { echo "No save file: $save_file"; return 1; }
+
+  local current_session=""
+  local current_window=""
+
+  while IFS=$'\t' read -r session window_idx window_name pane_idx pane_dir pane_cmd; do
+    # Create session if new
+    if [[ $session != "$current_session" ]]; then
+      if ! tmux has-session -t "=$session" 2>/dev/null; then
+        tmux new-session -d -s "$session" -c "$pane_dir"
+        tmux rename-window -t "$session:1" "$window_name"
+      fi
+      current_session="$session"
+      current_window="$window_idx"
+      continue
+    fi
+
+    # Create window if new
+    if [[ $window_idx != "$current_window" ]]; then
+      tmux new-window -t "$session:" -n "$window_name" -c "$pane_dir"
+      current_window="$window_idx"
+      continue
+    fi
+
+    # Additional pane in current window
+    tmux split-window -t "$session:$window_idx" -c "$pane_dir"
+    tmux select-layout -t "$session:$window_idx" tiled
+  done < "$save_file"
+
+  echo "Restored from $save_file"
 }
