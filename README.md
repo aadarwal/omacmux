@@ -66,6 +66,7 @@ Creates N tiled panes all running the same command. Great for parallel AI:
 
 ```bash
 tsl 4 cx   # 4 tiled panes, each running claude
+tsl 4 cxx  # 4 tiled panes, each running claude (full permissions skip)
 ```
 
 ### `t` - Quick tmux
@@ -105,6 +106,7 @@ Attaches to existing tmux session or creates a new "Work" session.
 | `t` | `tmux attach \|\| tmux new -s Work` |
 | `c` | `opencode` |
 | `cx` | `claude` (with permissions skip) |
+| `cxx` | `claude` (with full permissions skip) |
 | `n` | `nvim` |
 | `g` | `git` |
 | `d` | `docker` |
