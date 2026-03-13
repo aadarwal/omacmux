@@ -36,8 +36,5 @@ alias r='rails'
 unalias t 2>/dev/null
 n() { if [ "$#" -eq 0 ]; then command nvim . ; else command nvim "$@"; fi; }
 
-# Git
+# Git (gcm, gcam, gcad are in config/bash/fns/git)
 alias g='git'
-alias gcm='git commit -m'
-alias gcam='git commit -a -m'
-alias gcad='git commit -a --amend'

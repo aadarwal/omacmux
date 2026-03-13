@@ -1,0 +1,188 @@
+# ==============================================================================
+# Git Aliases (moved from config/bash/aliases)
+# ==============================================================================
+
+alias gcm='git commit -m'
+alias gcam='git commit -a -m'
+alias gcad='git commit -a --amend'
+
+# ==============================================================================
+# Interactive Operations (fzf-powered)
+# ==============================================================================
+
+# fzf branch checkout
+# Usage: gb [filter]
+gb() {
+  local branch
+  branch=$(git branch -a --sort=-committerdate --color=always \
+    --format='%(color:yellow)%(refname:short)%(color:reset) %(color:dim)%(committerdate:relative)%(color:reset) %(subject)' \
+    | fzf --ansi --tmux 70%,50% \
+      --header "enter: checkout  ctrl-d: delete branch" \
+      --query "${1:-}" \
+      --preview 'git log --oneline --graph --color=always -15 {1}' \
+      --preview-window "right:50%" \
+      --bind "ctrl-d:execute-silent(git branch -d {1} 2>/dev/null || git branch -D {1})+reload:git branch -a --sort=-committerdate --color=always --format='%(color:yellow)%(refname:short)%(color:reset) %(color:dim)%(committerdate:relative)%(color:reset) %(subject)'" \
+    | awk '{print $1}') || return 0
+
+  # Strip ANSI codes
+  branch=$(echo "$branch" | sed 's/\x1b\[[0-9;]*m//g')
+
+  # Strip remotes/origin/ for remote branches
+  branch="${branch#remotes/origin/}"
+
+  git checkout "$branch"
+}
+
+# fzf git log browser
+# Usage: gl
+gl() {
+  local selection
+  selection=$(git log --oneline --graph --decorate --color=always "$@" \
+    | fzf --ansi --tmux 80%,70% --no-sort \
+      --header "enter: copy SHA  ctrl-d: show diff" \
+      --preview 'echo {} | grep -oE "[a-f0-9]{7,}" | head -1 | xargs -I% git show --color=always %' \
+      --preview-window "right:55%" \
+      --bind 'ctrl-d:execute(echo {} | grep -oE "[a-f0-9]{7,}" | head -1 | xargs -I% git show --color=always % | less -R)') || return 0
+
+  local sha
+  sha=$(echo "$selection" | grep -oE "[a-f0-9]{7,}" | head -1)
+  [[ -n $sha ]] && echo "$sha" | tr -d '\n' | pbcopy && echo "Copied: $sha"
+}
+
+# fzf interactive staging
+# Usage: ga
+ga() {
+  local files
+  files=$(git -c color.status=always status --short \
+    | fzf --ansi --tmux 70%,60% --multi \
+      --header "tab: select  enter: stage  ctrl-u: unstage" \
+      --preview '
+        file=$(echo {} | awk "{print \$NF}")
+        if git diff --color=always -- "$file" 2>/dev/null | head -200 | grep -q .; then
+          git diff --color=always -- "$file" | head -200
+        elif git diff --cached --color=always -- "$file" 2>/dev/null | head -200 | grep -q .; then
+          git diff --cached --color=always -- "$file" | head -200
+        else
+          bat --style=numbers --color=always "$file" 2>/dev/null || cat "$file"
+        fi' \
+      --preview-window "right:55%" \
+      --bind "ctrl-u:execute-silent(echo {+} | tr ' ' '\n' | awk '{print \$NF}' | xargs git restore --staged -- 2>/dev/null)+reload:git -c color.status=always status --short") || return 0
+
+  echo "$files" | awk '{print $NF}' | xargs git add --
+  echo "Staged $(echo "$files" | wc -l | tr -d ' ') file(s)"
+}
+
+# fzf diff viewer
+# Usage: gd [ref]  (no arg: unstaged, --staged: staged, <ref>: diff against ref)
+gd() {
+  local diff_cmd="git diff --color=always"
+  [[ -n $1 ]] && diff_cmd="git diff --color=always $1"
+
+  local file
+  file=$(eval "$diff_cmd" --name-only \
+    | fzf --tmux 70%,60% \
+      --header "enter: open in editor" \
+      --preview "$diff_cmd -- {} | head -300" \
+      --preview-window "right:60%") || return 0
+
+  local line
+  line=$(eval "$diff_cmd" -- "$file" | grep -n '^@@' | head -1 | cut -d'+' -f2 | cut -d',' -f1)
+  ${EDITOR:-nvim} "+${line:-1}" "$file"
+}
+
+# fzf stash manager
+# Usage: gst
+gst() {
+  [[ -z $(git stash list) ]] && { echo "No stashes."; return 0; }
+
+  local selected
+  selected=$(git stash list --color=always \
+    | fzf --ansi --tmux 70%,60% --no-sort \
+      --header "enter: apply  ctrl-x: drop  ctrl-p: pop" \
+      --preview 'echo {} | cut -d: -f1 | xargs git stash show -p --color=always' \
+      --preview-window "right:55%" \
+      --bind "ctrl-x:execute-silent(echo {} | cut -d: -f1 | xargs git stash drop)+reload:git stash list --color=always" \
+      --bind "ctrl-p:abort+execute(echo {} | cut -d: -f1 | xargs git stash pop)") || return 0
+
+  local stash
+  stash=$(echo "$selected" | cut -d: -f1)
+  git stash apply "$stash"
+}
+
+# ==============================================================================
+# Workflow Shortcuts
+# ==============================================================================
+
+# Smart push (prints PR URL if one exists)
+# Usage: gp
+gp() {
+  git push "$@"
+  gh pr view --json url -q .url 2>/dev/null
+}
+
+# Force push with lease (safe force push)
+# Usage: gpf
+gpf() {
+  git push --force-with-lease "$@"
+}
+
+# Sync with upstream: fetch + rebase on default branch
+# Usage: gsync
+gsync() {
+  local default_branch
+  default_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+  [[ -z $default_branch ]] && default_branch="main"
+
+  echo "Syncing with origin/$default_branch..."
+  git fetch origin && git rebase "origin/$default_branch"
+}
+
+# Quick WIP commit
+gwip() {
+  git add -A && git commit -m "WIP"
+}
+
+# Undo WIP commit (only if last commit is "WIP")
+gunwip() {
+  local last_msg
+  last_msg=$(git log -1 --format=%s 2>/dev/null)
+  if [[ $last_msg == "WIP" ]]; then
+    git reset HEAD~1
+    echo "Unwipped. Changes are unstaged."
+  else
+    echo "Last commit is not WIP: '$last_msg'"
+    return 1
+  fi
+}
+
+# Create PR: push + gh pr create
+# Usage: gpr [-d]
+gpr() {
+  local draft_flag=""
+  [[ $1 == "-d" ]] && draft_flag="--draft"
+
+  git push 2>/dev/null
+  gh pr create $draft_flag
+}
+
+# Delete branches merged into default branch
+# Usage: gclean
+gclean() {
+  local default_branch
+  default_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+  [[ -z $default_branch ]] && default_branch="main"
+
+  local branches
+  branches=$(git branch --merged "origin/$default_branch" \
+    | grep -vE "^\*|^\s*(main|master|develop)\s*$" \
+    | sed 's/^[ *]*//')
+
+  [[ -z $branches ]] && { echo "No merged branches to clean."; return 0; }
+
+  local selected
+  selected=$(echo "$branches" \
+    | fzf --tmux 50%,40% --multi \
+      --header "select branches to delete (tab: multi-select)") || return 0
+
+  echo "$selected" | xargs git branch -d
+}

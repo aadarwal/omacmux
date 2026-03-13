@@ -1,0 +1,132 @@
+# ==============================================================================
+# fzf-Powered Tools
+# ==============================================================================
+
+# Interactive ripgrep → open in editor at matching line
+# Usage: rgi [initial_query]
+rgi() {
+  local initial="${1:-}"
+  local selected
+
+  selected=$(rg --color=always --line-number --no-heading --smart-case "${initial:-.}" \
+    | fzf --ansi --tmux 80%,70% \
+      --delimiter : \
+      --header "type to search  enter: open in editor" \
+      --preview 'bat --style=numbers --color=always --highlight-line {2} {1} 2>/dev/null | head -200' \
+      --preview-window "right:55%:+{2}-10" \
+      --bind "change:reload:rg --color=always --line-number --no-heading --smart-case {q} || true" \
+      --disabled --query "$initial") || return 0
+
+  local file line
+  file=$(echo "$selected" | cut -d: -f1)
+  line=$(echo "$selected" | cut -d: -f2)
+  ${EDITOR:-nvim} "+$line" "$file"
+}
+
+# Interactive fd → open in editor
+# Usage: fdi [initial_query]
+fdi() {
+  local initial="${1:-}"
+  local selected
+
+  selected=$(fd --type f --color=always "${initial:-.}" \
+    | fzf --ansi --tmux 70%,50% \
+      --header "type to filter  enter: open in editor" \
+      --preview 'bat --style=numbers --color=always {} 2>/dev/null | head -200' \
+      --preview-window "right:55%" \
+      --query "$initial") || return 0
+
+  ${EDITOR:-nvim} "$selected"
+}
+
+# fzf process picker: view and kill processes
+# Usage: fp
+fp() {
+  local selected
+  selected=$(ps -eo pid,user,%cpu,%mem,start,command \
+    | fzf --tmux 80%,60% --header-lines=1 \
+      --header "enter: SIGTERM  ctrl-k: SIGKILL" \
+      --preview 'ps -p {1} -o pid,ppid,user,%cpu,%mem,stat,start,command 2>/dev/null' \
+      --preview-window "down:4:wrap" \
+      --bind "ctrl-k:execute-silent(kill -9 {1})+reload:ps -eo pid,user,%cpu,%mem,start,command") || return 0
+
+  local pid
+  pid=$(echo "$selected" | awk '{print $1}')
+  [[ -n $pid ]] && kill "$pid" && echo "Sent SIGTERM to $pid"
+}
+
+# fzf environment variable browser
+# Usage: fenv
+fenv() {
+  local selected
+  selected=$(env | sort \
+    | fzf --tmux 70%,50% \
+      --delimiter '=' \
+      --header "enter: copy value" \
+      --preview 'echo {} | cut -d= -f2-') || return 0
+
+  local value
+  value=$(echo "$selected" | cut -d= -f2-)
+  echo "$value" | tr -d '\n' | pbcopy
+  echo "Copied: $(echo "$value" | head -c 80)"
+}
+
+# ==============================================================================
+# Quality-of-Life Functions
+# ==============================================================================
+
+# mkdir + cd in one step
+# Usage: mkd <name>
+mkd() {
+  [[ -z $1 ]] && { echo "Usage: mkd <name>"; return 1; }
+  mkdir -p "$1" && builtin cd "$1"
+}
+
+# Pretty JSON (uses jq)
+# Usage: json [file] [query]
+#   json file.json           → pretty print
+#   json file.json '.key'    → jq query
+#   echo '{}' | json         → from stdin
+#   echo '{}' | json '.key'  → from stdin with query
+json() {
+  if [[ -t 0 ]]; then
+    # Reading from file
+    local file="$1"
+    local query="${2:-.}"
+    [[ -z $file ]] && { echo "Usage: json <file> [query]  or  ... | json [query]"; return 1; }
+    jq -C "$query" "$file"
+  else
+    # Reading from stdin
+    local query="${1:-.}"
+    jq -C "$query"
+  fi
+}
+
+# Quick HTTP server
+# Usage: serve [port]
+serve() {
+  local port="${1:-8000}"
+  echo "Serving at http://localhost:$port"
+  python3 -m http.server "$port"
+}
+
+# Universal archive extraction
+# Usage: extract <file>
+extract() {
+  [[ -z $1 ]] && { echo "Usage: extract <file>"; return 1; }
+  [[ ! -f $1 ]] && { echo "Not a file: $1"; return 1; }
+
+  case "$1" in
+    *.tar.gz|*.tgz)     tar xzf "$1" ;;
+    *.tar.bz2|*.tbz2)   tar xjf "$1" ;;
+    *.tar.xz|*.txz)     tar xJf "$1" ;;
+    *.tar)               tar xf "$1" ;;
+    *.gz)                gunzip "$1" ;;
+    *.bz2)               bunzip2 "$1" ;;
+    *.xz)                unxz "$1" ;;
+    *.zip)               unzip "$1" ;;
+    *.7z)                7z x "$1" ;;
+    *.rar)               unrar x "$1" ;;
+    *)                   echo "Unknown format: $1"; return 1 ;;
+  esac
+}

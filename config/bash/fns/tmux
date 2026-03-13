@@ -196,6 +196,53 @@ to() {
 }
 
 # ==============================================================================
+# AI Workflow
+# ==============================================================================
+
+# AI in a popup
+# Usage: ta [initial_text]
+ta() {
+  [[ -z $TMUX ]] && { echo "ta requires tmux."; return 1; }
+  if [[ -n $1 ]]; then
+    tmux display-popup -E -w 80% -h 75% -d "#{pane_current_path}" "claude \"$*\""
+  else
+    tmux display-popup -E -w 80% -h 75% -d "#{pane_current_path}" "claude"
+  fi
+}
+
+# Broadcast text to all panes in current window (skips current pane)
+# Usage: tsb <text>
+tsb() {
+  [[ -z $1 ]] && { echo "Usage: tsb <text>"; return 1; }
+  [[ -z $TMUX ]] && { echo "tsb requires tmux."; return 1; }
+
+  local current_pane="$TMUX_PANE"
+  local panes
+  panes=$(tmux list-panes -F '#{pane_id}')
+
+  for pane in $panes; do
+    [[ $pane == "$current_pane" ]] && continue
+    tmux send-keys -t "$pane" "$*" C-m
+  done
+}
+
+# Broadcast text to all panes across ALL windows in session
+# Usage: tsa <text>
+tsa() {
+  [[ -z $1 ]] && { echo "Usage: tsa <text>"; return 1; }
+  [[ -z $TMUX ]] && { echo "tsa requires tmux."; return 1; }
+
+  local current_pane="$TMUX_PANE"
+  local panes
+  panes=$(tmux list-panes -a -F '#{pane_id}' -f '#{==:#{session_name},#{client_session}}')
+
+  for pane in $panes; do
+    [[ $pane == "$current_pane" ]] && continue
+    tmux send-keys -t "$pane" "$*" C-m
+  done
+}
+
+# ==============================================================================
 # Layouts
 # ==============================================================================
 
