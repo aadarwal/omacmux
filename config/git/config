@@ -32,3 +32,6 @@
 [credential "https://gist.github.com"]
 	helper =
 	helper = !/opt/homebrew/bin/gh auth git-credential
+[user]
+	email = aadarsh@uchicago.edu
+	name = Aadarsh Agarwal

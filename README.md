@@ -7,7 +7,7 @@ Ports the [omarchy](https://github.com/basecamp/omarchy) developer experience to
 ## Install
 
 ```bash
-git clone https://github.com/<user>/omacmux.git ~/omacmux
+git clone https://github.com/aadarwal/omacmux.git ~/omacmux
 cd ~/omacmux && ./install.sh
 ```
 
