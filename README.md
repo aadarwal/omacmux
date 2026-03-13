@@ -146,6 +146,78 @@ tml "tail -f log/dev.log" "docker stats" "htop"
 └───────────────────────┴──────────────┘
 ```
 
+## Git Worktree Layouts
+
+Worktree-aware layouts for running AI agents across multiple branches simultaneously.
+
+### `twdl <ai>` - Worktree Dev Layout
+
+The 2D layout: nvim on the left, vertically stacked AI agents on the right (one per worktree), terminal at the bottom. Each agent is cd'd into a different worktree.
+
+```
+┌──────────────────────┬─────────────────────┐
+│                      │ cx @ master          │
+│     nvim (70%)       ├─────────────────────┤
+│   (browses all wts)  │ cx @ feat/auth       │
+├──────────────────────┴─────────────────────┤
+│              terminal (15%)                │
+└────────────────────────────────────────────┘
+```
+
+```bash
+twdl cx              # nvim + one claude per worktree (auto-detect all)
+twdl cx master feat  # nvim + agents for specific branches only
+```
+
+### `twsl <ai>` - Worktree Swarm Layout
+
+Full-width vertical stack, one AI per worktree. Maximum agent visibility.
+
+```
+┌────────────────────────────────────────────┐
+│  cx @ master                               │
+├────────────────────────────────────────────┤
+│  cx @ feat/auth                            │
+├────────────────────────────────────────────┤
+│  cx @ fix/bug                              │
+└────────────────────────────────────────────┘
+```
+
+```bash
+twsl cxx             # full-width vertical swarm across all worktrees
+twsl cx master feat  # swarm for specific branches only
+```
+
+### `twl <branch> <ai> [ai2]` - Single Worktree Layout
+
+Creates a worktree (if needed) and opens a `tdl` in a new window tab.
+
+```bash
+twl feat/auth cx    # new tab with full dev layout in feat/auth worktree
+```
+
+### `twlm <ai> [ai2]` - Multi-Worktree Tab Layout
+
+One `tdl` window per existing worktree.
+
+```bash
+twlm cx    # one tab per worktree, each with nvim + claude + terminal
+```
+
+## Worktree Management
+
+| Command | Description |
+|---------|-------------|
+| `gwa <branch> [base]` | Create worktree as sibling directory |
+| `gwr [branch]` | Remove worktree (fzf picker if no arg) |
+| `gwl` | List all worktrees |
+| `gws [branch]` | cd into a worktree (fzf picker if no arg) |
+| `twf [path]` | Refocus all AI panes in a `twdl` window to a specific worktree |
+
+Worktrees are created as sibling directories: `~/myapp` → `~/myapp-feat-auth`.
+
+In nvim, press `<leader>gw` to open a telescope worktree picker that switches nvim's cwd and auto-focuses the corresponding agent pane.
+
 ## Session Persistence
 
 | Command | Description |
@@ -204,6 +276,9 @@ tmux select-window -t :1
 | `w` | Window picker (fzf popup) |
 | `j` | Project jump (fzf popup) |
 | `` ` `` | Scratchpad popup |
+| `g` | Git log graph (popup) |
+| `G` | Worktree switcher (fzf popup) |
+| `b` | Branch switcher (fzf popup) |
 
 ## Tool Aliases
 
@@ -221,10 +296,10 @@ tmux select-window -t :1
 ## What's Included
 
 - **Ghostty** config with `macos-option-as-alt`, JetBrainsMono Nerd Font, hidden titlebar
-- **tmux** config with vi-copy mode, mouse support, blue status bar, pbcopy clipboard integration, nested tmux toggle (F12)
-- **Neovim** with LazyVim framework, 46 plugins, tokyonight-night theme, 14 colorschemes available, transparent backgrounds, neo-tree file explorer
-- **Starship** prompt with git branch/status indicators
-- **Git** config with rebase-on-pull, histogram diffs, rerere, GitHub CLI credential helper
+- **tmux** config with vi-copy mode, mouse support, blue status bar with git branch per tab, pbcopy clipboard integration, nested tmux toggle (F12), git/branch/worktree popup pickers
+- **Neovim** with LazyVim framework, 46 plugins, tokyonight-night theme, 14 colorschemes available, transparent backgrounds, neo-tree file explorer, telescope worktree picker
+- **Starship** prompt with git branch/status indicators, worktree detection
+- **Git** config with rebase-on-pull, histogram diffs, rerere, GitHub CLI credential helper, worktree aliases
 - **Bash** with eza, fzf, zoxide, bat, mise, history search, tab-completion cycling
 
 ## Important Notes

@@ -1,0 +1,308 @@
+# ==============================================================================
+# Worktree Management
+# ==============================================================================
+
+# Create a worktree as a sibling directory
+# Usage: gwa <branch> [base_ref]
+gwa() {
+  [[ -z $1 ]] && { echo "Usage: gwa <branch> [base_ref]"; return 1; }
+
+  local branch="$1"
+  local base="${2:-HEAD}"
+  local repo_root repo_name worktree_dir branch_slug
+
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "Not in a git repo."; return 1; }
+  repo_name="$(basename "$repo_root")"
+  branch_slug="${branch//\//-}"
+  worktree_dir="$(dirname "$repo_root")/${repo_name}-${branch_slug}"
+
+  if git show-ref --verify --quiet "refs/heads/$branch"; then
+    git worktree add "$worktree_dir" "$branch"
+  else
+    git worktree add -b "$branch" "$worktree_dir" "$base"
+  fi
+
+  echo "Worktree ready: $worktree_dir"
+}
+
+# Remove a worktree
+# Usage: gwr [branch]
+gwr() {
+  local repo_root repo_name branch worktree_dir
+
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "Not in a git repo."; return 1; }
+
+  if [[ -n $1 ]]; then
+    branch="$1"
+  else
+    branch=$(_gw_pick) || return 1
+  fi
+
+  repo_name="$(basename "$repo_root")"
+  local branch_slug="${branch//\//-}"
+  worktree_dir="$(dirname "$repo_root")/${repo_name}-${branch_slug}"
+
+  if [[ -d "$worktree_dir" ]]; then
+    git worktree remove "$worktree_dir"
+  else
+    # Try finding by branch name in worktree list
+    local wt_path
+    wt_path=$(git worktree list --porcelain | awk -v b="$branch" '
+      /^worktree /{path=$2}
+      /^branch refs\/heads\//{if(substr($2,12)==b) print path}
+    ')
+    if [[ -n $wt_path ]]; then
+      git worktree remove "$wt_path"
+    else
+      echo "Worktree not found for branch: $branch"
+      return 1
+    fi
+  fi
+}
+
+# List all worktrees
+gwl() {
+  git worktree list
+}
+
+# Switch to a worktree (cd into it)
+# Usage: gws [branch]
+gws() {
+  local branch wt_path
+
+  if [[ -n $1 ]]; then
+    branch="$1"
+  else
+    branch=$(_gw_pick) || return 1
+  fi
+
+  wt_path=$(git worktree list --porcelain | awk -v b="$branch" '
+    /^worktree /{path=$2}
+    /^branch refs\/heads\//{if(substr($2,12)==b) print path}
+  ')
+
+  if [[ -n $wt_path ]]; then
+    builtin cd "$wt_path"
+  else
+    echo "Worktree not found for branch: $branch"
+    return 1
+  fi
+}
+
+# Internal: fzf picker for worktree branch names
+_gw_pick() {
+  local pick
+  pick=$(git worktree list --porcelain \
+    | awk '/^worktree /{path=$2} /^branch refs\/heads\//{print substr($2,12) "\t" path}' \
+    | fzf --prompt="worktree> " --with-nth=1 \
+    | cut -f1)
+  [[ -z $pick ]] && return 1
+  echo "$pick"
+}
+
+# ==============================================================================
+# Worktree Layouts
+# ==============================================================================
+
+# Internal: list worktree directories, optionally filtered by branch names
+# Usage: _twt_list [branch1 branch2 ...]
+_twt_list() {
+  while IFS= read -r line; do
+    local dir branch
+    dir=$(echo "$line" | awk '{print $1}')
+    branch=$(echo "$line" | sed 's/.*\[\(.*\)\]/\1/')
+    if [[ $# -eq 0 ]]; then
+      echo "$dir"
+    else
+      for arg in "$@"; do
+        if [[ "$branch" == "$arg" || "$dir" == *"$arg"* ]]; then
+          echo "$dir"
+          break
+        fi
+      done
+    fi
+  done < <(git worktree list 2>/dev/null | grep -v '(bare)')
+}
+
+# Refocus all AI panes in the current twdl window to a specific worktree
+# Usage: twf [worktree_path]
+twf() {
+  local target_dir="${1:-$PWD}"
+  local pane_map
+  pane_map=$(tmux show-option -wqv @wt_panes 2>/dev/null)
+  [[ -z "$pane_map" ]] && { echo "No AI panes registered (not a twdl window?)"; return 1; }
+
+  for entry in ${pane_map//,/ }; do
+    local pane_id="${entry%%:*}"
+    tmux send-keys -t "$pane_id" C-c 2>/dev/null
+    tmux send-keys -t "$pane_id" "cd '$target_dir'" C-m 2>/dev/null
+  done
+  echo "Refocused AI panes to $target_dir"
+}
+
+# Worktree Dev Layout: nvim + vertically stacked agents (one per worktree) + terminal
+# Usage: twdl <ai_command> [branch1 branch2 ...]
+twdl() {
+  [[ -z $1 ]] && { echo "Usage: twdl <ai_command> [branch1 branch2 ...]"; return 1; }
+  [[ -z $TMUX ]] && { echo "You must start tmux to use twdl."; return 1; }
+
+  local ai="$1"
+  shift
+  local repo_root editor_pane
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "Not in a git repo."; return 1; }
+
+  editor_pane="$TMUX_PANE"
+  tmux rename-window -t "$editor_pane" "$(basename "$repo_root")"
+
+  # Collect worktree paths (filtered by branch args if provided)
+  local -a wt_paths
+  while IFS= read -r path; do
+    [[ -n $path ]] && wt_paths+=("$path")
+  done < <(_twt_list "$@")
+
+  if (( ${#wt_paths[@]} < 1 )); then
+    echo "No worktrees found. Use 'git worktree add' first."
+    return 1
+  fi
+
+  # Cap at 5 worktrees (right column gets too cramped beyond that)
+  if (( ${#wt_paths[@]} > 5 )); then
+    echo "Warning: Capping at 5 worktrees (${#wt_paths[@]} found). Use twsl for more."
+    wt_paths=("${wt_paths[@]:0:5}")
+  fi
+
+  # Terminal pane (bottom 15%)
+  tmux split-window -v -p 15 -t "$editor_pane" -c "$repo_root"
+
+  # First AI pane (right 30% of editor)
+  local -a wt_panes
+  local first_ai_pane
+  first_ai_pane=$(tmux split-window -h -p 30 -t "$editor_pane" -c "${wt_paths[0]}" -P -F '#{pane_id}')
+  wt_panes+=("$first_ai_pane")
+
+  # Stack additional worktrees vertically in the right column
+  for ((i=1; i<${#wt_paths[@]}; i++)); do
+    local new_pane
+    new_pane=$(tmux split-window -v -t "${wt_panes[-1]}" -c "${wt_paths[$i]}" -P -F '#{pane_id}')
+    wt_panes+=("$new_pane")
+  done
+
+  # Store pane-to-worktree mapping for nvim reactive focus
+  local pane_map=""
+  for ((i=0; i<${#wt_panes[@]}; i++)); do
+    [[ -n $pane_map ]] && pane_map+=","
+    pane_map+="${wt_panes[$i]}:${wt_paths[$i]}"
+  done
+  tmux set-option -w @wt_panes "$pane_map"
+
+  # Launch AI in each worktree pane
+  for pane in "${wt_panes[@]}"; do
+    tmux send-keys -t "$pane" "$ai" C-m
+  done
+
+  # Launch nvim in editor pane
+  tmux send-keys -t "$editor_pane" "$EDITOR ." C-m
+  tmux select-pane -t "$editor_pane"
+}
+
+# Worktree Swarm Layout: full-width vertically stacked agents, one per worktree
+# Usage: twsl <ai_command> [branch1 branch2 ...]
+twsl() {
+  [[ -z $1 ]] && { echo "Usage: twsl <ai_command> [branch1 branch2 ...]"; return 1; }
+  [[ -z $TMUX ]] && { echo "You must start tmux to use twsl."; return 1; }
+
+  local ai="$1"
+  shift
+  local repo_root
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "Not in a git repo."; return 1; }
+
+  # Collect worktree paths (filtered by branch args if provided)
+  local -a wt_paths panes
+  while IFS= read -r path; do
+    [[ -n $path ]] && wt_paths+=("$path")
+  done < <(_twt_list "$@")
+
+  if (( ${#wt_paths[@]} < 1 )); then
+    echo "No worktrees found. Use 'git worktree add' first."
+    return 1
+  fi
+
+  tmux rename-window -t "$TMUX_PANE" "$(basename "$repo_root")"
+
+  # First pane is current pane, cd into first worktree
+  panes+=("$TMUX_PANE")
+
+  # Create vertical splits for each additional worktree
+  for ((i=1; i<${#wt_paths[@]}; i++)); do
+    local new_pane
+    new_pane=$(tmux split-window -v -t "${panes[-1]}" -c "${wt_paths[$i]}" -P -F '#{pane_id}')
+    panes+=("$new_pane")
+  done
+
+  # cd first pane into first worktree
+  tmux send-keys -t "${panes[0]}" "cd '${wt_paths[0]}'" C-m
+
+  # Launch AI in all panes
+  for pane in "${panes[@]}"; do
+    tmux send-keys -t "$pane" "$ai" C-m
+  done
+
+  tmux select-pane -t "${panes[0]}"
+}
+
+# Single Worktree Layout: create worktree + tdl in a new window tab
+# Usage: twl <branch> <ai> [ai2]
+twl() {
+  [[ -z $1 || -z $2 ]] && { echo "Usage: twl <branch> <ai> [ai2]"; return 1; }
+  [[ -z $TMUX ]] && { echo "You must start tmux to use twl."; return 1; }
+
+  local branch="$1"
+  local ai="$2"
+  local ai2="$3"
+  local repo_root repo_name worktree_dir branch_slug
+
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "Not in a git repo."; return 1; }
+  repo_name="$(basename "$repo_root")"
+  branch_slug="${branch//\//-}"
+  worktree_dir="$(dirname "$repo_root")/${repo_name}-${branch_slug}"
+
+  # Create worktree if it doesn't exist
+  if [[ ! -d "$worktree_dir" ]]; then
+    gwa "$branch" || return 1
+  fi
+
+  # Open a new tmux window in the worktree directory and run tdl
+  local pane_id
+  pane_id=$(tmux new-window -c "$worktree_dir" -P -F '#{pane_id}')
+  tmux send-keys -t "$pane_id" "tdl $ai $ai2" C-m
+}
+
+# Multi-Worktree tab Layout: one tdl window per existing worktree
+# Usage: twlm <ai> [ai2]
+twlm() {
+  [[ -z $1 ]] && { echo "Usage: twlm <ai> [ai2]"; return 1; }
+  [[ -z $TMUX ]] && { echo "You must start tmux to use twlm."; return 1; }
+
+  local ai="$1"
+  local ai2="$2"
+  local repo_root
+  local first=true
+
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "Not in a git repo."; return 1; }
+  tmux rename-session "$(basename "$repo_root" | tr '.:' '--')"
+
+  while IFS= read -r wt_path; do
+    if $first; then
+      # Reuse current window for first worktree (cd if needed)
+      if [[ "$wt_path" != "$PWD" ]]; then
+        tmux send-keys -t "$TMUX_PANE" "cd '$wt_path'" C-m
+      fi
+      tmux send-keys -t "$TMUX_PANE" "tdl $ai $ai2" C-m
+      first=false
+    else
+      local pane_id
+      pane_id=$(tmux new-window -c "$wt_path" -P -F '#{pane_id}')
+      tmux send-keys -t "$pane_id" "tdl $ai $ai2" C-m
+    fi
+  done < <(git worktree list | awk '{print $1}')
+}

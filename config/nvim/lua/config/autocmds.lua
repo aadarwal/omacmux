@@ -6,3 +6,25 @@
 --
 -- Or remove existing autocmds by their group name (which is prefixed with `lazyvim_` for the defaults)
 -- e.g. vim.api.nvim_del_augroup_by_name("lazyvim_wrap_spell")
+
+-- Reactive worktree pane focus: when nvim's cwd changes, focus the tmux agent
+-- pane that corresponds to that worktree (set by twdl via @wt_panes window var)
+vim.api.nvim_create_autocmd("DirChanged", {
+  group = vim.api.nvim_create_augroup("worktree_pane_focus", { clear = true }),
+  callback = function()
+    local cwd = vim.fn.getcwd()
+    local ok, pane_map = pcall(function()
+      return vim.fn.system("tmux show-option -wqv @wt_panes 2>/dev/null"):gsub("%s+$", "")
+    end)
+    if not ok or pane_map == "" then
+      return
+    end
+    for entry in pane_map:gmatch("[^,]+") do
+      local pane_id, path = entry:match("([^:]+):(.*)")
+      if pane_id and path and cwd:find(path, 1, true) then
+        vim.fn.system("tmux select-pane -t " .. pane_id)
+        break
+      end
+    end
+  end,
+})

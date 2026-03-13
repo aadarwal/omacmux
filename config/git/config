@@ -5,6 +5,10 @@
 	br = branch
 	ci = commit
 	st = status
+	wt = worktree
+	wta = worktree add
+	wtl = worktree list
+	wtr = worktree remove
 [init]
 	defaultBranch = master
 [pull]
