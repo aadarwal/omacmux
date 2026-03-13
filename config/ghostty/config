@@ -1,0 +1,26 @@
+# Font
+font-family = "JetBrainsMono Nerd Font"
+font-style = Regular
+font-size = 13
+
+# Window
+window-theme = ghostty
+window-padding-x = 14
+window-padding-y = 14
+confirm-close-surface = false
+resize-overlay = never
+
+# Cursor styling
+cursor-style = "block"
+cursor-style-blink = false
+
+# Shell integration
+shell-integration-features = no-cursor
+
+# macOS specific
+macos-option-as-alt = true
+macos-titlebar-style = hidden
+window-save-state = always
+
+# Slowdown mouse scrolling
+mouse-scroll-multiplier = 0.95

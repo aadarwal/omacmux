@@ -1,0 +1,19 @@
+[[ $- != *i* ]] && return
+
+OMACMUX_PATH="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"
+
+path_prepend() {
+  case ":$PATH:" in *":$1:"*) ;; *) PATH="$1:$PATH" ;; esac
+}
+path_prepend "/opt/homebrew/bin"
+path_prepend "$HOME/.local/bin"
+export PATH
+
+source "$OMACMUX_PATH/config/bash/envs"
+source "$OMACMUX_PATH/config/bash/shell"
+source "$OMACMUX_PATH/config/bash/aliases"
+for f in "$OMACMUX_PATH/config/bash/fns"/*; do source "$f"; done
+source "$OMACMUX_PATH/config/bash/init"
+[[ $- == *i* ]] && bind -f "$OMACMUX_PATH/config/bash/inputrc"
+
+# Add your own customizations below this line
