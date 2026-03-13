@@ -28,10 +28,10 @@
 	autoupdate = true        # Apply stored conflict resolutions automatically
 [credential "https://github.com"]
 	helper =
-	helper = !/opt/homebrew/bin/gh auth git-credential
+	helper = !gh auth git-credential
 [credential "https://gist.github.com"]
 	helper =
-	helper = !/opt/homebrew/bin/gh auth git-credential
+	helper = !gh auth git-credential
 [user]
 	email = aadarsh@uchicago.edu
 	name = Aadarsh Agarwal

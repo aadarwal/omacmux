@@ -5,4 +5,4 @@ export BAT_THEME=ansi
 
 # Paths
 export OMACMUX_PATH="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"
-export PATH="/opt/homebrew/bin:$OMACMUX_PATH/bin:$HOME/.local/bin:$PATH"
+export PATH="$OMACMUX_PATH/bin:$PATH"

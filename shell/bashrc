@@ -5,7 +5,9 @@ OMACMUX_PATH="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"
 path_prepend() {
   case ":$PATH:" in *":$1:"*) ;; *) PATH="$1:$PATH" ;; esac
 }
-path_prepend "/opt/homebrew/bin"
+[[ "$(uname)" == "Darwin" ]] && path_prepend "/opt/homebrew/bin"
+path_prepend "$HOME/.cargo/bin"
+path_prepend "$HOME/.local/share/mise/shims"
 path_prepend "$HOME/.local/bin"
 export PATH
 

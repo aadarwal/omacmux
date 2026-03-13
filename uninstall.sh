@@ -37,5 +37,9 @@ fi
 
 echo ""
 echo "==> omacmux removed."
-echo "    Homebrew packages were NOT uninstalled."
-echo "    Run 'brew bundle cleanup --file=~/omacmux/Brewfile --force' to remove them."
+echo "    Installed packages were NOT uninstalled."
+if [[ "$(uname)" == "Darwin" ]]; then
+  echo "    Run 'brew bundle cleanup --file=~/omacmux/Brewfile --force' to remove them."
+else
+  echo "    Remove tmux, neovim, and other packages via your system package manager."
+fi
