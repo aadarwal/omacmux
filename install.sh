@@ -62,14 +62,12 @@ link_file() {
   fi
 }
 
+source "$REPO_DIR/links.sh"
+
 echo "==> Linking config files..."
-link_file "$REPO_DIR/config/ghostty/config" "$HOME/.config/ghostty/config"
-link_file "$REPO_DIR/config/tmux/tmux.conf" "$HOME/.config/tmux/tmux.conf"
-link_file "$REPO_DIR/config/nvim"           "$HOME/.config/nvim"
-link_file "$REPO_DIR/config/starship.toml"  "$HOME/.config/starship.toml"
-link_file "$REPO_DIR/config/git/config"     "$HOME/.config/git/config"
-link_file "$REPO_DIR/shell/bashrc"          "$HOME/.bashrc"
-link_file "$REPO_DIR/shell/bash_profile"    "$HOME/.bash_profile"
+for entry in "${OMACMUX_LINKS[@]}"; do
+  link_file "$REPO_DIR/${entry%%:*}" "${entry#*:}"
+done
 
 # 7. Set up git identity
 echo ""

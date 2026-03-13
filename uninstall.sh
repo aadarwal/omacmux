@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 echo "==> Removing omacmux..."
 
 unlink_file() {
@@ -21,13 +23,11 @@ unlink_file() {
   fi
 }
 
-unlink_file "$HOME/.config/ghostty/config"
-unlink_file "$HOME/.config/tmux/tmux.conf"
-unlink_file "$HOME/.config/nvim"
-unlink_file "$HOME/.config/starship.toml"
-unlink_file "$HOME/.config/git/config"
-unlink_file "$HOME/.bashrc"
-unlink_file "$HOME/.bash_profile"
+source "$REPO_DIR/links.sh"
+
+for entry in "${OMACMUX_LINKS[@]}"; do
+  unlink_file "${entry#*:}"
+done
 
 # Remove the install symlink
 if [[ -L "$HOME/.local/share/omacmux" ]]; then

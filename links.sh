@@ -1,0 +1,13 @@
+# Symlink manifest — sourced by install.sh, uninstall.sh, upgrade.sh
+# REPO_DIR must be set before sourcing this file.
+# Format: "source_relative_path:destination_absolute_path"
+
+OMACMUX_LINKS=(
+  "config/ghostty/config:$HOME/.config/ghostty/config"
+  "config/tmux/tmux.conf:$HOME/.config/tmux/tmux.conf"
+  "config/nvim:$HOME/.config/nvim"
+  "config/starship.toml:$HOME/.config/starship.toml"
+  "config/git/config:$HOME/.config/git/config"
+  "shell/bashrc:$HOME/.bashrc"
+  "shell/bash_profile:$HOME/.bash_profile"
+)

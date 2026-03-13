@@ -20,6 +20,22 @@ The installer will:
 
 Open a **new Ghostty window** after install.
 
+## Upgrade
+
+```bash
+cd ~/omacmux && ./upgrade.sh
+```
+
+Pulls the latest code, installs any new dependencies, and creates symlinks for any new config files. Existing configs update automatically via symlinks.
+
+## Uninstall
+
+```bash
+cd ~/omacmux && ./uninstall.sh
+```
+
+Removes all config symlinks (restoring backups if they exist) and the install symlink. Homebrew packages are left in place — run the printed cleanup command to remove them.
+
 ## Session Management
 
 | Command | Description |
