@@ -1,0 +1,754 @@
+# ==============================================================================
+# Mesh: Tailscale device management
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+# Refresh cached tailscale status (respects TTL)
+_mesh_refresh() {
+  local cache_dir="$HOME/.local/share/omacmux/mesh"
+  local cache_file="$cache_dir/devices.json"
+  local meta_file="$cache_dir/devices.meta"
+  local max_age="${MESH_CACHE_TTL:-30}"
+
+  mkdir -p "$cache_dir"
+
+  if [[ -f "$meta_file" && -f "$cache_file" ]]; then
+    local age=$(( $(date +%s) - $(cat "$meta_file") ))
+    if (( age < max_age )); then
+      return 0
+    fi
+  fi
+
+  tailscale status --json > "$cache_file" 2>/dev/null || return 1
+  date +%s > "$meta_file"
+}
+
+# Parse device list from cache as TSV: name, os, status, ip, relay
+# Usage: _mesh_devices [filter]
+# Filters: all, ssh (macOS/linux), online, compute (default: online + ssh-capable)
+_mesh_devices() {
+  local filter="${1:-compute}"
+  _mesh_refresh || return 1
+
+  local cache="$HOME/.local/share/omacmux/mesh/devices.json"
+  local self_name
+  self_name=$(jq -r '.Self.DNSName | split(".")[0]' "$cache")
+
+  jq -r --arg filter "$filter" --arg self "$self_name" '
+    def ssh_os: . == "macOS" or . == "linux";
+
+    # Build device list: self first, then peers
+    [
+      (.Self | {
+        name: (.DNSName | split(".")[0]),
+        os: .OS,
+        online: true,
+        ip: .TailscaleIPs[0],
+        relay: "--",
+        is_self: true
+      })
+    ] + [
+      .Peer | to_entries[].value | {
+        name: (.DNSName | split(".")[0]),
+        os: .OS,
+        online: .Online,
+        ip: .TailscaleIPs[0],
+        relay: (if .Relay == "" then "--" else .Relay end),
+        is_self: false
+      }
+    ] |
+
+    # Apply filter
+    if $filter == "ssh" then
+      map(select(.os | ssh_os))
+    elif $filter == "online" then
+      map(select(.online))
+    elif $filter == "compute" then
+      map(select(.online and (.os | ssh_os)))
+    else . end |
+
+    # Sort: self first, then by name
+    sort_by(if .is_self then "!" else .name end) |
+
+    # Output TSV
+    .[] | [
+      .name,
+      .os,
+      (if .online then "online" else "offline" end),
+      .ip,
+      .relay,
+      (if .is_self then "self" else "" end)
+    ] | @tsv
+  ' "$cache"
+}
+
+# Check if a device name is the local machine
+_mesh_is_self() {
+  local device="$1"
+  _mesh_refresh || return 1
+  local cache="$HOME/.local/share/omacmux/mesh/devices.json"
+  local self_name
+  self_name=$(jq -r '.Self.DNSName | split(".")[0]' "$cache")
+  [[ "$device" == "$self_name" ]]
+}
+
+# FZF single device picker
+_mesh_pick() {
+  local filter="${1:-compute}"
+  local pick
+  pick=$(_mesh_devices "$filter" | \
+    fzf --tmux 70%,50% \
+      --prompt "device> " \
+      --header "select a device" \
+      --delimiter $'\t' \
+      --with-nth 1,2,3,4 \
+      --preview '_mesh_info {1}' \
+      --preview-window "right:45%") || return 1
+  echo "${pick%%$'\t'*}"
+}
+
+# FZF multi-select device picker
+_mesh_picks() {
+  local filter="${1:-compute}"
+  _mesh_devices "$filter" | \
+    fzf --tmux 70%,50% \
+      --prompt "devices> " \
+      --header "tab: multi-select  enter: confirm" \
+      --multi \
+      --delimiter $'\t' \
+      --with-nth 1,2,3,4 \
+      --preview '_mesh_info {1}' \
+      --preview-window "right:45%" | \
+    while IFS=$'\t' read -r name _; do
+      echo "$name"
+    done
+}
+
+# Probe a device for system info (cached with TTL)
+# Usage: _mesh_probe <device>
+_mesh_probe() {
+  local device="$1"
+  [[ -z "$device" ]] && return 1
+
+  local profile_dir="$HOME/.local/share/omacmux/mesh/profiles"
+  local profile="$profile_dir/$device.json"
+  local max_age="${MESH_PROBE_TTL:-300}"
+
+  mkdir -p "$profile_dir"
+
+  # Check cache freshness
+  if [[ -f "$profile" ]]; then
+    local mtime
+    mtime=$(stat -f %m "$profile" 2>/dev/null || stat -c %Y "$profile" 2>/dev/null)
+    local age=$(( $(date +%s) - mtime ))
+    if (( age < max_age )); then
+      cat "$profile"
+      return 0
+    fi
+  fi
+
+  # Portable probe script (works on macOS + Linux)
+  local probe_script='
+{
+  echo "{"
+  printf "\"hostname\": \"%s\"," "$(hostname -s 2>/dev/null || hostname)"
+
+  # OS version
+  if [ "$(uname)" = "Darwin" ]; then
+    printf "\"os\": \"macOS %s\"," "$(sw_vers -productVersion 2>/dev/null)"
+  elif [ -f /etc/os-release ]; then
+    printf "\"os\": \"%s\"," "$(. /etc/os-release && echo "$PRETTY_NAME")"
+  else
+    printf "\"os\": \"%s\"," "$(uname -sr)"
+  fi
+
+  # Arch
+  printf "\"arch\": \"%s\"," "$(uname -m)"
+
+  # CPUs
+  if [ "$(uname)" = "Darwin" ]; then
+    printf "\"cpus\": %d," "$(sysctl -n hw.ncpu 2>/dev/null || echo 0)"
+  else
+    printf "\"cpus\": %d," "$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 0)"
+  fi
+
+  # Load averages
+  if [ "$(uname)" = "Darwin" ]; then
+    set -- $(sysctl -n vm.loadavg 2>/dev/null | tr -d "{}")
+    printf "\"load\": [%s, %s, %s]," "${1:-0}" "${2:-0}" "${3:-0}"
+  elif [ -f /proc/loadavg ]; then
+    set -- $(cat /proc/loadavg)
+    printf "\"load\": [%s, %s, %s]," "$1" "$2" "$3"
+  else
+    printf "\"load\": [0, 0, 0],"
+  fi
+
+  # Memory (MB)
+  if [ "$(uname)" = "Darwin" ]; then
+    total_mb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1048576 ))
+    ps=$(vm_stat 2>/dev/null | awk "/page size/{gsub(/[^0-9]/,\"\"); print}")
+    active=$(vm_stat 2>/dev/null | awk "/Pages active/{gsub(/[^0-9]/,\"\"); print}")
+    wired=$(vm_stat 2>/dev/null | awk "/Pages wired/{gsub(/[^0-9]/,\"\"); print}")
+    used_mb=$(( (${active:-0} + ${wired:-0}) * ${ps:-4096} / 1048576 ))
+    printf "\"mem_total_mb\": %d, \"mem_used_mb\": %d," "$total_mb" "$used_mb"
+  elif command -v free >/dev/null 2>&1; then
+    set -- $(free -m 2>/dev/null | awk "/^Mem:/{print \$2, \$3}")
+    printf "\"mem_total_mb\": %d, \"mem_used_mb\": %d," "${1:-0}" "${2:-0}"
+  else
+    printf "\"mem_total_mb\": 0, \"mem_used_mb\": 0,"
+  fi
+
+  # Disk (MB, root filesystem)
+  disk_total=$(df -m / 2>/dev/null | awk "NR==2{print \$2}")
+  disk_used=$(df -m / 2>/dev/null | awk "NR==2{print \$3}")
+  printf "\"disk_total_mb\": %d, \"disk_used_mb\": %d," "${disk_total:-0}" "${disk_used:-0}"
+
+  # Uptime (seconds)
+  if [ "$(uname)" = "Darwin" ]; then
+    boot=$(sysctl -n kern.boottime 2>/dev/null | awk "{print \$4}" | tr -d ",")
+    printf "\"uptime_secs\": %d," "$(( $(date +%s) - ${boot:-$(date +%s)} ))"
+  elif [ -f /proc/uptime ]; then
+    printf "\"uptime_secs\": %d," "$(awk "{print int(\$1)}" /proc/uptime)"
+  else
+    printf "\"uptime_secs\": 0,"
+  fi
+
+  # Tmux sessions
+  sessions=$(tmux list-sessions 2>/dev/null | wc -l | tr -d " ")
+  printf "\"tmux_sessions\": %d," "${sessions:-0}"
+
+  # AI tools available
+  tools=""
+  command -v claude >/dev/null 2>&1 && tools="${tools}claude,"
+  command -v opencode >/dev/null 2>&1 && tools="${tools}opencode,"
+  command -v codex >/dev/null 2>&1 && tools="${tools}codex,"
+  printf "\"ai_tools\": \"%s\"," "${tools%,}"
+
+  printf "\"probe_time\": \"%s\"" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "}"
+}
+'
+
+  local result
+  if _mesh_is_self "$device"; then
+    result=$(bash -c "$probe_script" 2>/dev/null)
+  else
+    result=$(tailscale ssh "$device" -- bash -c "$probe_script" 2>/dev/null)
+  fi
+
+  if [[ -n "$result" ]] && echo "$result" | jq . >/dev/null 2>&1; then
+    echo "$result" > "$profile"
+    echo "$result"
+  else
+    echo '{"error": "probe failed"}' > "$profile"
+    return 1
+  fi
+}
+
+# Render a bar chart: _mesh_bar <used> <total> <width>
+_mesh_bar() {
+  local used="$1" total="$2" width="${3:-12}"
+  (( total == 0 )) && { printf "[%${width}s]" ""; return; }
+  local pct=$(( used * 100 / total ))
+  local filled=$(( used * width / total ))
+  (( filled > width )) && filled=$width
+  local empty=$(( width - filled ))
+
+  local bar=""
+  for ((i=0; i<filled; i++)); do bar+="█"; done
+  for ((i=0; i<empty; i++)); do bar+="░"; done
+  printf "[%s] %d%%" "$bar" "$pct"
+}
+
+# Format uptime seconds as human readable
+_mesh_uptime_fmt() {
+  local secs="$1"
+  local days=$(( secs / 86400 ))
+  local hours=$(( (secs % 86400) / 3600 ))
+  local mins=$(( (secs % 3600) / 60 ))
+  if (( days > 0 )); then
+    printf "%dd %dh %dm" "$days" "$hours" "$mins"
+  elif (( hours > 0 )); then
+    printf "%dh %dm" "$hours" "$mins"
+  else
+    printf "%dm" "$mins"
+  fi
+}
+
+# Display formatted probe data for a device
+# Usage: _mesh_probe_display <device>
+_mesh_probe_display() {
+  local device="$1"
+  [[ -z "$device" ]] && return 1
+
+  local profile="$HOME/.local/share/omacmux/mesh/profiles/$device.json"
+
+  # Run probe if no cached data
+  if [[ ! -f "$profile" ]]; then
+    _mesh_probe "$device" >/dev/null 2>&1
+  fi
+
+  if [[ ! -f "$profile" ]] || jq -e '.error' "$profile" >/dev/null 2>&1; then
+    echo "  $device"
+    echo "  ──────────────────────────────"
+    echo "  Probe failed or no data available."
+    echo "  Run 'mesh probe $device' to retry."
+    return 1
+  fi
+
+  local bold='\033[1m'
+  local cyan='\033[36m'
+  local dim='\033[2m'
+  local reset='\033[0m'
+
+  local os arch cpus uptime_secs mem_total mem_used disk_total disk_used tmux_sess ai_tools
+  local l1 l5 l15
+  os=$(jq -r '.os' "$profile")
+  arch=$(jq -r '.arch' "$profile")
+  cpus=$(jq -r '.cpus' "$profile")
+  l1=$(jq -r '.load[0]' "$profile")
+  l5=$(jq -r '.load[1]' "$profile")
+  l15=$(jq -r '.load[2]' "$profile")
+  mem_total=$(jq -r '.mem_total_mb' "$profile")
+  mem_used=$(jq -r '.mem_used_mb' "$profile")
+  disk_total=$(jq -r '.disk_total_mb' "$profile")
+  disk_used=$(jq -r '.disk_used_mb' "$profile")
+  uptime_secs=$(jq -r '.uptime_secs' "$profile")
+  tmux_sess=$(jq -r '.tmux_sessions' "$profile")
+  ai_tools=$(jq -r '.ai_tools' "$profile")
+
+  local mem_total_g=$(( mem_total / 1024 ))
+  local mem_used_g=$(( mem_used / 1024 ))
+  local disk_total_g=$(( disk_total / 1024 ))
+  local disk_used_g=$(( disk_used / 1024 ))
+
+  local is_self_tag=""
+  _mesh_is_self "$device" && is_self_tag=" (this machine)"
+
+  printf "\n  ${bold}${cyan}%s${reset}%s\n" "$device" "$is_self_tag"
+  echo "  ──────────────────────────────"
+  printf "  OS:      %-18s arch: %s\n" "$os" "$arch"
+  printf "  CPUs:    %-18s Load: %s %s %s\n" "$cpus" "$l1" "$l5" "$l15"
+  printf "  Memory:  %dG / %dG  %s\n" "$mem_used_g" "$mem_total_g" "$(_mesh_bar "$mem_used" "$mem_total")"
+  printf "  Disk:    %dG / %dG  %s\n" "$disk_used_g" "$disk_total_g" "$(_mesh_bar "$disk_used" "$disk_total")"
+  printf "  Uptime:  %s\n" "$(_mesh_uptime_fmt "$uptime_secs")"
+  if (( tmux_sess >= 0 )); then
+    printf "  Tmux:    %d session(s)\n" "$tmux_sess"
+  fi
+  if [[ -n "$ai_tools" && "$ai_tools" != "null" ]]; then
+    printf "  AI:      %s\n" "$ai_tools"
+  fi
+  local probe_time
+  probe_time=$(jq -r '.probe_time' "$profile")
+  printf "  ${dim}probed: %s${reset}\n" "$probe_time"
+  echo ""
+}
+
+# Show device info (used as FZF preview and by mesh info)
+_mesh_info() {
+  local device="$1"
+  _mesh_refresh 2>/dev/null
+  local cache="$HOME/.local/share/omacmux/mesh/devices.json"
+  [[ ! -f "$cache" ]] && { echo "No cache data."; return 1; }
+
+  local self_name
+  self_name=$(jq -r '.Self.DNSName | split(".")[0]' "$cache")
+
+  if [[ "$device" == "$self_name" ]]; then
+    jq -r --arg name "$device" '
+      .Self | "
+  DEVICE INFO
+  ──────────────────────────────
+  Name:      " + (.DNSName | split(".")[0]) + " (this machine)
+  Hostname:  " + .HostName + "
+  OS:        " + .OS + "
+  IPs:       " + (.TailscaleIPs | join(", ")) + "
+  DNS:       " + .DNSName + "
+  Status:    online
+  Created:   " + .Created + "
+  Key exp:   " + .KeyExpiry + "
+"' "$cache"
+  else
+    jq -r --arg name "$device" '
+      [.Peer | to_entries[].value] |
+      map(select((.DNSName | split(".")[0]) == $name)) |
+      .[0] // empty |
+      "
+  DEVICE INFO
+  ──────────────────────────────
+  Name:      " + (.DNSName | split(".")[0]) + "
+  Hostname:  " + .HostName + "
+  OS:        " + .OS + "
+  IPs:       " + (.TailscaleIPs | join(", ")) + "
+  DNS:       " + .DNSName + "
+  Status:    " + (if .Online then "online" else "offline (last: " + .LastSeen + ")" end) + "
+  Relay:     " + (if .Relay == "" then "direct" else .Relay end) + "
+  Traffic:   rx " + ((.RxBytes // 0) | tostring) + " / tx " + ((.TxBytes // 0) | tostring) + " bytes
+  Created:   " + .Created + "
+  Key exp:   " + .KeyExpiry + "
+"' "$cache"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# User-facing commands
+# ------------------------------------------------------------------------------
+
+# Main entry point with subcommand routing
+mesh() {
+  local subcmd="${1:-hub}"
+  shift 2>/dev/null
+
+  case "$subcmd" in
+    hub|"")         _mesh_hub "$@" ;;
+    status|st)      _mesh_status "$@" ;;
+    ssh)            _mesh_ssh "$@" ;;
+    run)            _mesh_run "$@" ;;
+    ping)           _mesh_ping "$@" ;;
+    info)           _mesh_info "$@" ;;
+    probe)          _mesh_probe "$@" ;;
+    detail)         _mesh_detail "$@" ;;
+    monitor|mon)    _mesh_monitor "$@" ;;
+    deploy)         _mesh_deploy "$@" ;;
+    broadcast|bc)   _mesh_broadcast "$@" ;;
+    refresh)        _mesh_force_refresh ;;
+    help|--help)    _mesh_help ;;
+    *)
+      echo "mesh: unknown command '$subcmd'"
+      _mesh_help
+      return 1
+      ;;
+  esac
+}
+
+_mesh_help() {
+  cat <<'EOF'
+Usage: mesh [command] [args]
+
+Commands:
+  (none)              Open device hub (FZF picker)
+  status              Show device status table
+  ssh <device>        SSH into device (new tmux pane)
+  run <device> <cmd>  Run command on remote device
+  ping [device]       Ping device(s) via Tailscale
+  info <device>       Show device info (Tailscale data)
+  probe <device>      Probe device for system info
+  detail <device>     Live system info popup (tmux)
+  monitor [cmd]       Monitor layout: btop across devices (tmux)
+  deploy <ai> [dev]   Deploy AI agent on remote device (tmux)
+  broadcast <text>    Send text to all mesh panes (tmux)
+  refresh             Force cache refresh
+  help                Show this help
+
+Options:
+  mesh ssh -w <device>   Open in new window instead of split pane
+
+Environment:
+  MESH_CACHE_TTL    Cache lifetime in seconds (default: 30)
+  MESH_PROBE_TTL    Probe cache lifetime in seconds (default: 300)
+EOF
+}
+
+# FZF device hub
+_mesh_hub() {
+  _mesh_refresh || { echo "mesh: cannot reach tailscale."; return 1; }
+
+  local selected
+  selected=$(_mesh_devices compute | \
+    fzf --tmux 80%,60% \
+      --header "enter: ssh  ctrl-p: ping  ctrl-i: info" \
+      --delimiter $'\t' \
+      --with-nth 1,2,3,4 \
+      --preview '_mesh_info {1}' \
+      --preview-window "right:50%" \
+      --bind "ctrl-p:execute(tailscale ping -c 3 {1} 2>&1 | head -10)+refresh-preview" \
+      --bind "ctrl-i:execute(_mesh_info {1} | less)") || return 0
+
+  local device="${selected%%$'\t'*}"
+  [[ -z "$device" ]] && return 0
+
+  _mesh_ssh "$device"
+}
+
+# Inline status table (shows probe data when available)
+_mesh_status() {
+  _mesh_refresh || { echo "mesh: cannot reach tailscale."; return 1; }
+
+  local green='\033[32m'
+  local dim='\033[2m'
+  local bold='\033[1m'
+  local cyan='\033[36m'
+  local reset='\033[0m'
+  local profile_dir="$HOME/.local/share/omacmux/mesh/profiles"
+
+  printf "${bold}  %-24s %-8s %-8s %-18s %-7s %s${reset}\n" \
+    "DEVICE" "OS" "STATUS" "IP" "LOAD" "MEM"
+
+  while IFS=$'\t' read -r name os status ip relay is_self; do
+    local indicator name_display load_str mem_str
+
+    if [[ "$status" == "online" ]]; then
+      indicator="${green}●${reset}"
+    else
+      indicator="${dim}○${reset}"
+    fi
+
+    if [[ "$is_self" == "self" ]]; then
+      name_display="$name *"
+    else
+      name_display="$name"
+    fi
+
+    # Pull probe data if cached
+    load_str="--"
+    mem_str="--"
+    local profile="$profile_dir/$name.json"
+    if [[ -f "$profile" ]] && ! jq -e '.error' "$profile" >/dev/null 2>&1; then
+      local l1 mem_used mem_total
+      l1=$(jq -r '.load[0]' "$profile" 2>/dev/null)
+      mem_used=$(jq -r '.mem_used_mb' "$profile" 2>/dev/null)
+      mem_total=$(jq -r '.mem_total_mb' "$profile" 2>/dev/null)
+      [[ "$l1" != "null" && -n "$l1" ]] && load_str="$l1"
+      if [[ "$mem_total" != "null" && -n "$mem_total" && "$mem_total" != "0" ]]; then
+        mem_str="$(( mem_used / 1024 ))G/$(( mem_total / 1024 ))G"
+      fi
+    fi
+
+    if [[ "$status" == "online" ]]; then
+      printf "${indicator} %-24s %-8s ${green}%-8s${reset} %-18s %-7s %s\n" \
+        "$name_display" "$os" "$status" "$ip" "$load_str" "$mem_str"
+    else
+      printf "${indicator} ${dim}%-24s %-8s %-8s %-18s %-7s %s${reset}\n" \
+        "$name_display" "$os" "$status" "$ip" "--" "--"
+    fi
+  done < <(_mesh_devices all)
+}
+
+# SSH into a device
+_mesh_ssh() {
+  local window_mode=false
+  local device=""
+
+  # Parse flags
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -w) window_mode=true; shift ;;
+      *)  device="$1"; shift ;;
+    esac
+  done
+
+  [[ -z "$device" ]] && { device=$(_mesh_pick) || return 1; }
+
+  # Self: just open a local shell
+  if _mesh_is_self "$device"; then
+    echo "mesh: $device is this machine."
+    return 0
+  fi
+
+  # Outside tmux: direct SSH
+  if [[ -z "$TMUX" ]]; then
+    tailscale ssh "$device"
+    return
+  fi
+
+  # Inside tmux: new pane or window
+  if $window_mode; then
+    local pane_id
+    pane_id=$(tmux new-window -n "$device" -P -F '#{pane_id}')
+    tmux send-keys -t "$pane_id" "tailscale ssh $device" C-m
+  else
+    local pane_id
+    pane_id=$(tmux split-window -h -P -F '#{pane_id}')
+    tmux send-keys -t "$pane_id" "tailscale ssh $device" C-m
+  fi
+}
+
+# Run a command on a remote device
+_mesh_run() {
+  local device="$1"
+
+  if [[ -z "$device" ]]; then
+    device=$(_mesh_pick) || return 1
+    echo "Command to run on $device:"
+    read -r cmd
+    [[ -z "$cmd" ]] && return 1
+  else
+    shift
+    local cmd="$*"
+    [[ -z "$cmd" ]] && { echo "Usage: mesh run <device> <command>"; return 1; }
+  fi
+
+  if _mesh_is_self "$device"; then
+    echo "--- $device (local) ---"
+    eval "$cmd"
+  else
+    echo "--- $device ---"
+    tailscale ssh "$device" -- $cmd
+  fi
+}
+
+# Ping device(s) via Tailscale
+_mesh_ping() {
+  local device="$1"
+
+  if [[ -n "$device" ]]; then
+    if _mesh_is_self "$device"; then
+      echo "mesh: $device is this machine."
+      return 0
+    fi
+    tailscale ping -c 3 "$device"
+    return
+  fi
+
+  # No device specified: ping all online compute devices
+  _mesh_refresh || return 1
+  local self_name
+  self_name=$(jq -r '.Self.DNSName | split(".")[0]' "$HOME/.local/share/omacmux/mesh/devices.json")
+
+  while IFS=$'\t' read -r name os status ip relay is_self; do
+    [[ "$is_self" == "self" ]] && continue
+    printf "%-24s " "$name"
+    local result
+    result=$(tailscale ping -c 1 --timeout 3s "$name" 2>&1 | head -1)
+    echo "$result"
+  done < <(_mesh_devices compute)
+}
+
+# Force cache refresh
+_mesh_force_refresh() {
+  local meta_file="$HOME/.local/share/omacmux/mesh/devices.meta"
+  rm -f "$meta_file"
+  _mesh_refresh && echo "mesh: cache refreshed." || echo "mesh: refresh failed."
+}
+
+# Live device detail popup (refreshes every 5s)
+_mesh_detail() {
+  local device="${1:-$(_mesh_pick)}"
+  [[ -z "$device" ]] && return 1
+  [[ -z "$TMUX" ]] && { echo "mesh detail requires tmux."; return 1; }
+
+  # Export functions so the subshell can use them
+  tmux display-popup -E -w 60% -h 50% -T " $device " \
+    "bash -c '
+      source \"${OMACMUX_PATH:-$HOME/omacmux}/config/bash/fns/mesh\"
+      while true; do
+        clear
+        _mesh_probe \"$device\" >/dev/null 2>&1
+        _mesh_probe_display \"$device\"
+        echo \"  Press q to close, r to refresh now\"
+        read -t 5 -n 1 key
+        case \"\$key\" in
+          q) break ;;
+          r) rm -f \"\$HOME/.local/share/omacmux/mesh/profiles/$device.json\" ;;
+        esac
+      done
+    '"
+}
+
+# Mesh monitor layout: main pane + stacked device monitors on right
+# Usage: mesh monitor [command] [device1 device2 ...]
+_mesh_monitor() {
+  [[ -z $TMUX ]] && { echo "mesh monitor requires tmux."; return 1; }
+
+  local cmd="${1:-btop}"
+  shift 2>/dev/null
+  local -a devices
+
+  # Use remaining args as device list, or auto-detect
+  if [[ $# -gt 0 ]]; then
+    devices=("$@")
+  else
+    while IFS=$'\t' read -r name _; do
+      devices+=("$name")
+    done < <(_mesh_devices compute)
+  fi
+
+  if (( ${#devices[@]} < 1 )); then
+    echo "mesh: no online compute devices found."
+    return 1
+  fi
+
+  local main_pane="$TMUX_PANE"
+  tmux rename-window -t "$main_pane" "mesh-monitor"
+
+  # First device gets right pane at 40%
+  local side_pane
+  side_pane=$(tmux split-window -h -p 40 -t "$main_pane" -P -F '#{pane_id}')
+
+  local first_device="${devices[0]}"
+  if _mesh_is_self "$first_device"; then
+    tmux send-keys -t "$side_pane" "$cmd" C-m
+  else
+    tmux send-keys -t "$side_pane" "tailscale ssh $first_device -t $cmd" C-m
+  fi
+
+  local mesh_map="$side_pane:$first_device"
+
+  # Stack remaining devices vertically in the right column
+  local prev="$side_pane"
+  for ((i=1; i<${#devices[@]}; i++)); do
+    local new_pane dev="${devices[$i]}"
+    new_pane=$(tmux split-window -v -t "$prev" -P -F '#{pane_id}')
+
+    if _mesh_is_self "$dev"; then
+      tmux send-keys -t "$new_pane" "$cmd" C-m
+    else
+      tmux send-keys -t "$new_pane" "tailscale ssh $dev -t $cmd" C-m
+    fi
+
+    mesh_map+=",$new_pane:$dev"
+    prev="$new_pane"
+  done
+
+  # Store pane-to-device mapping
+  tmux set-option -w @mesh_panes "$mesh_map"
+  tmux select-pane -t "$main_pane"
+}
+
+# Deploy an AI agent on a remote device
+# Usage: mesh deploy <ai_command> [device]
+_mesh_deploy() {
+  local ai="$1"
+  [[ -z "$ai" ]] && { echo "Usage: mesh deploy <ai_command> [device]"; return 1; }
+  [[ -z $TMUX ]] && { echo "mesh deploy requires tmux."; return 1; }
+
+  local device="${2:-$(_mesh_pick)}"
+  [[ -z "$device" ]] && return 1
+
+  local pane_id
+  pane_id=$(tmux new-window -n "ai@$device" -P -F '#{pane_id}')
+
+  if _mesh_is_self "$device"; then
+    tmux send-keys -t "$pane_id" "$ai" C-m
+  else
+    tmux send-keys -t "$pane_id" "tailscale ssh $device -t '$ai'" C-m
+  fi
+}
+
+# Broadcast text to all mesh panes in current window
+# Usage: mesh broadcast <text>
+_mesh_broadcast() {
+  [[ -z "$1" ]] && { echo "Usage: mesh broadcast <text>"; return 1; }
+  [[ -z $TMUX ]] && { echo "mesh broadcast requires tmux."; return 1; }
+
+  local current_pane="$TMUX_PANE"
+  local mesh_map
+  mesh_map=$(tmux show-option -wqv @mesh_panes 2>/dev/null)
+
+  if [[ -n "$mesh_map" ]]; then
+    # Mesh-aware: send to tracked mesh panes
+    local count=0
+    for entry in ${mesh_map//,/ }; do
+      local pane_id="${entry%%:*}"
+      [[ "$pane_id" == "$current_pane" ]] && continue
+      tmux send-keys -t "$pane_id" "$*" C-m 2>/dev/null && (( count++ ))
+    done
+    echo "mesh: broadcast to $count pane(s)."
+  else
+    echo "mesh: no mesh panes in this window. Use 'mesh monitor' first."
+    return 1
+  fi
+}
