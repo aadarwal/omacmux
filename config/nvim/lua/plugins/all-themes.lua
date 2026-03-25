@@ -48,7 +48,7 @@ return {
 		priority = 1000,
 	},
 	{
-		"tahayvr/matteblack.nvim",
+		"folke/tokyonight.nvim",
 		lazy = true,
 		priority = 1000,
 	},
@@ -65,11 +65,6 @@ return {
 	{
 		"rose-pine/neovim",
 		name = "rose-pine",
-		lazy = true,
-		priority = 1000,
-	},
-	{
-		"folke/tokyonight.nvim",
 		lazy = true,
 		priority = 1000,
 	},

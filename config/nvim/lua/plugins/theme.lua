@@ -1,12 +1,12 @@
 return {
 	{
-		"folke/tokyonight.nvim",
+		"tahayvr/matteblack.nvim",
 		priority = 1000,
 	},
 	{
 		"LazyVim/LazyVim",
 		opts = {
-			colorscheme = "tokyonight-night",
+			colorscheme = "matteblack",
 		},
 	},
 }
