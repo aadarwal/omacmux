@@ -5,6 +5,7 @@
 OMACMUX_LINKS=(
   "config/ghostty/config:$HOME/.config/ghostty/config"
   "config/tmux/tmux.conf:$HOME/.config/tmux/tmux.conf"
+  "config/tmux/session-bar.sh:$HOME/.config/tmux/session-bar.sh"
   "config/nvim:$HOME/.config/nvim"
   "config/starship.toml:$HOME/.config/starship.toml"
   "config/git/config:$HOME/.config/git/config"
