@@ -102,9 +102,9 @@ tp() {
 
   local fmt='#{session_name}: #{session_windows} windows#{?session_attached, (attached),}'
   local selected
-  selected=$(tmux list-sessions -F "$fmt" | fzf --tmux 60%,40% \
+  selected=$(tmux list-sessions -F "$fmt" | grep -v '^_stash:' | fzf --tmux 60%,40% \
     --header "ctrl-x: kill  enter: switch" \
-    --bind "ctrl-x:execute-silent(tmux kill-session -t {1})+reload:tmux list-sessions -F \"$fmt\" 2>/dev/null || true" \
+    --bind "ctrl-x:execute-silent(tmux kill-session -t {1})+reload(tmux list-sessions -F \"$fmt\" 2>/dev/null | grep -v '^_stash:' || true)" \
     --delimiter ":" \
     --preview "tmux capture-pane -e -p -t {1}:" \
     --preview-window "right:60%") || return 0
@@ -193,6 +193,64 @@ to() {
   [[ -z $TMUX ]] && { echo "to requires tmux."; return 1; }
   local cmd="${1:-$SHELL}"
   tmux display-popup -E -w 80% -h 75% -d "#{pane_current_path}" "$cmd"
+}
+
+# Stash current window (move to _stash session for later retrieval)
+# Usage: tws [session:window]  (auto-detected if omitted)
+tws() {
+  local target="$1"
+
+  if [[ -z $target ]]; then
+    [[ -z $TMUX ]] && { echo "tws requires tmux."; return 1; }
+    target=$(tmux display-message -p '#S:#I')
+  fi
+
+  local session="${target%%:*}"
+  [[ $session == "_stash" ]] && { echo "Already in stash."; return 1; }
+
+  # Tag window with origin session
+  tmux set-option -w -t "$target" @stash_origin "$session"
+
+  # Ensure _stash session exists
+  if ! tmux has-session -t =_stash 2>/dev/null; then
+    tmux new-session -d -s _stash
+    local placeholder
+    placeholder=$(tmux list-windows -t _stash -F '#{window_id}' | head -1)
+    tmux move-window -s "$target" -t _stash:
+    tmux kill-window -t "$placeholder"
+  else
+    tmux move-window -s "$target" -t _stash:
+  fi
+}
+
+# Grab a window back from the stash (fzf picker)
+# Usage: twg
+twg() {
+  [[ -z $TMUX ]] && { echo "twg requires tmux."; return 1; }
+
+  if ! tmux has-session -t =_stash 2>/dev/null; then
+    echo "Stash is empty."
+    return 1
+  fi
+
+  local fmt='#{window_index}: #{window_name} (from: #{@stash_origin})'
+  local selected
+  selected=$(tmux list-windows -t _stash -F "$fmt" | sort -t: -k1 -rn | fzf --reverse \
+    --no-sort \
+    --header "Grab from stash" \
+    --preview "tmux capture-pane -e -p -t _stash:{1}" \
+    --delimiter ":") || return 0
+
+  local idx="${selected%%:*}"
+  local target
+  target=$(tmux display-message -p '#S')
+
+  tmux move-window -s "_stash:$idx" -t "$target:"
+
+  # Clean up empty stash session
+  if [[ -z $(tmux list-windows -t _stash 2>/dev/null) ]]; then
+    tmux kill-session -t =_stash 2>/dev/null
+  fi
 }
 
 # ==============================================================================
