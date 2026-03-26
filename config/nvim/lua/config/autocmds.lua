@@ -7,6 +7,18 @@
 -- Or remove existing autocmds by their group name (which is prefixed with `lazyvim_` for the defaults)
 -- e.g. vim.api.nvim_del_augroup_by_name("lazyvim_wrap_spell")
 
+-- Open PDFs in macOS Preview instead of displaying binary in buffer
+vim.api.nvim_create_autocmd("BufReadCmd", {
+  group = vim.api.nvim_create_augroup("pdf_open_external", { clear = true }),
+  pattern = "*.pdf",
+  callback = function(ev)
+    vim.fn.jobstart({ "open", vim.api.nvim_buf_get_name(ev.buf) }, { detach = true })
+    vim.defer_fn(function()
+      vim.api.nvim_buf_delete(ev.buf, { force = true })
+    end, 100)
+  end,
+})
+
 -- Reactive worktree pane focus: when nvim's cwd changes, focus the tmux agent
 -- pane that corresponds to that worktree (set by twdl via @wt_panes window var)
 vim.api.nvim_create_autocmd("DirChanged", {
