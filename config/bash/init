@@ -13,3 +13,11 @@ fi
 if command -v fzf &> /dev/null; then
   eval "$(fzf --bash)"
 fi
+
+# Auto-show device picker on fresh terminal windows
+# Skips: inside tmux (use Prefix+m there), subshells
+# Press Escape to dismiss and get a normal shell prompt
+if [[ -z "$TMUX" && -z "$MESH_PICKER_SHOWN" ]]; then
+  export MESH_PICKER_SHOWN=1
+  mesh 2>/dev/null
+fi
