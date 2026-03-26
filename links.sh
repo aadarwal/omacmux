@@ -9,6 +9,9 @@ OMACMUX_LINKS=(
   "config/nvim:$HOME/.config/nvim"
   "config/starship.toml:$HOME/.config/starship.toml"
   "config/git/config:$HOME/.config/git/config"
+  "config/claude/settings.json:$HOME/.claude/settings.json"
   "shell/bashrc:$HOME/.bashrc"
   "shell/bash_profile:$HOME/.bash_profile"
+  "config/bash/inputrc:$HOME/.inputrc"
+  "shell/.hushlogin:$HOME/.hushlogin"
 )
