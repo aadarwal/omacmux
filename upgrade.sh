@@ -22,7 +22,7 @@ AFTER=$(git -C "$REPO_DIR" rev-parse HEAD)
 
 # 3. Install any new Homebrew dependencies
 echo "==> Updating Homebrew dependencies..."
-brew bundle --file="$REPO_DIR/Brewfile"
+HOMEBREW_NO_AUTO_UPDATE=1 brew bundle --file="$REPO_DIR/Brewfile"
 
 # 4. Add Homebrew bash to /etc/shells (idempotent)
 if [[ -f "$BREW_BASH" ]] && ! grep -q "$BREW_BASH" /etc/shells 2>/dev/null; then

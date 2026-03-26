@@ -23,7 +23,7 @@ fi
 
 # 3. Install dependencies
 echo "==> Installing dependencies from Brewfile..."
-brew bundle --file="$REPO_DIR/Brewfile"
+HOMEBREW_NO_AUTO_UPDATE=1 brew bundle --file="$REPO_DIR/Brewfile"
 
 # 4. Add Homebrew bash to allowed shells
 if [[ -f "$BREW_BASH" ]] && ! grep -q "$BREW_BASH" /etc/shells 2>/dev/null; then

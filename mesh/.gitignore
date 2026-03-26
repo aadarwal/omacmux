@@ -1,4 +1,5 @@
-# Ignore runtime cache — only hosts.json is config
+# Ignore runtime cache — config files are tracked
 *
 !.gitignore
 !hosts.json
+!users.json

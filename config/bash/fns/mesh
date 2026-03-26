@@ -311,7 +311,9 @@ _mesh_probe() {
   if _mesh_is_self "$device"; then
     result=$(bash -c "$probe_script" 2>/dev/null)
   else
-    result=$(tailscale ssh "$device" -- bash -c "$probe_script" 2>/dev/null)
+    local ip; ip=$(_mesh_device_ip "$device")
+    local suser; suser=$(_mesh_device_user "$device")
+    result=$(ssh "$suser@$ip" -- bash -c "$probe_script" 2>/dev/null)
   fi
 
   if [[ -n "$result" ]] && echo "$result" | jq . >/dev/null 2>&1; then
@@ -695,9 +697,12 @@ _mesh_hub() {
   local src
   src=$(_mesh_src)
 
+  local fzf_opts=()
+  [[ -n "$TMUX" ]] && fzf_opts+=(--tmux 80%,60%)
+
   local selected
   selected=$(echo "$devices" | \
-    fzf --tmux 80%,60% \
+    fzf "${fzf_opts[@]}" \
       --header "enter: ssh  ctrl-p: ping  ctrl-i: info" \
       --delimiter $'\t' \
       --with-nth 1,2,3,4 \
@@ -779,6 +784,29 @@ _mesh_status() {
   done < <(_mesh_devices all)
 }
 
+# Resolve SSH user for a Tailscale device (per-device override via mesh/users.json)
+_mesh_device_user() {
+  local device="$1"
+  local users_file="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/mesh/users.json"
+  if [[ -f "$users_file" ]]; then
+    local user
+    user=$(jq -r --arg name "$device" '.[$name] // empty' "$users_file")
+    [[ -n "$user" ]] && { echo "$user"; return; }
+  fi
+  echo "${MESH_SSH_USER:-$USER}"
+}
+
+# Resolve Tailscale device name to its IP
+_mesh_device_ip() {
+  local device="$1"
+  local cache="$HOME/.local/share/omacmux/mesh/devices.json"
+  jq -r --arg name "$device" '
+    [.Self, (.Peer | to_entries[].value)] |
+    map(select((.DNSName | split(".")[0]) == $name)) |
+    .[0].TailscaleIPs[0] // empty
+  ' "$cache"
+}
+
 # SSH into a device
 _mesh_ssh() {
   local window_mode=false
@@ -800,9 +828,17 @@ _mesh_ssh() {
     return 0
   fi
 
+  local ip
+  ip=$(_mesh_device_ip "$device")
+  [[ -z "$ip" ]] && { echo "mesh: cannot resolve IP for $device"; return 1; }
+
+  local suser
+  suser=$(_mesh_device_user "$device")
+  local ssh_cmd="ssh $suser@$ip"
+
   # Outside tmux: direct SSH
   if [[ -z "$TMUX" ]]; then
-    tailscale ssh "$device"
+    eval "$ssh_cmd"
     return
   fi
 
@@ -810,11 +846,11 @@ _mesh_ssh() {
   if $window_mode; then
     local pane_id
     pane_id=$(tmux new-window -n "$device" -P -F '#{pane_id}')
-    tmux send-keys -t "$pane_id" "tailscale ssh $device" C-m
+    tmux send-keys -t "$pane_id" "$ssh_cmd" C-m
   else
     local pane_id
     pane_id=$(tmux split-window -h -P -F '#{pane_id}')
-    tmux send-keys -t "$pane_id" "tailscale ssh $device" C-m
+    tmux send-keys -t "$pane_id" "$ssh_cmd" C-m
   fi
 }
 
@@ -904,7 +940,9 @@ _mesh_run() {
     eval "$cmd"
   else
     echo "--- $device ---"
-    tailscale ssh "$device" -- $cmd
+    local ip; ip=$(_mesh_device_ip "$device")
+    local suser; suser=$(_mesh_device_user "$device")
+    ssh "$suser@$ip" -- $cmd
   fi
 }
 
@@ -1000,7 +1038,9 @@ _mesh_monitor() {
   if _mesh_is_self "$first_device"; then
     tmux send-keys -t "$side_pane" "$cmd" C-m
   else
-    tmux send-keys -t "$side_pane" "tailscale ssh $first_device -t $cmd" C-m
+    local ip; ip=$(_mesh_device_ip "$first_device")
+    local suser; suser=$(_mesh_device_user "$first_device")
+    tmux send-keys -t "$side_pane" "ssh $suser@$ip -t $cmd" C-m
   fi
 
   local mesh_map="$side_pane:$first_device"
@@ -1014,7 +1054,9 @@ _mesh_monitor() {
     if _mesh_is_self "$dev"; then
       tmux send-keys -t "$new_pane" "$cmd" C-m
     else
-      tmux send-keys -t "$new_pane" "tailscale ssh $dev -t $cmd" C-m
+      local ip; ip=$(_mesh_device_ip "$dev")
+      local suser; suser=$(_mesh_device_user "$dev")
+      tmux send-keys -t "$new_pane" "ssh $suser@$ip -t $cmd" C-m
     fi
 
     mesh_map+=",$new_pane:$dev"
@@ -1042,7 +1084,9 @@ _mesh_deploy() {
   if _mesh_is_self "$device"; then
     tmux send-keys -t "$pane_id" "$ai" C-m
   else
-    tmux send-keys -t "$pane_id" "tailscale ssh $device -t '$ai'" C-m
+    local ip; ip=$(_mesh_device_ip "$device")
+    local suser; suser=$(_mesh_device_user "$device")
+    tmux send-keys -t "$pane_id" "ssh $suser@$ip -t '$ai'" C-m
   fi
 }
 
