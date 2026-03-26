@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Standalone wrapper so `swarm` is callable as a command (not just a function)
+# This lets AI agents inside Claude Code run `swarm send`, `swarm collect`, etc.
+source "${OMACMUX_PATH:-$HOME/.local/share/omacmux}/config/bash/fns/swarm"
+swarm "$@"

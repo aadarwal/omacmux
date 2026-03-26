@@ -14,4 +14,5 @@ OMACMUX_LINKS=(
   "shell/bash_profile:$HOME/.bash_profile"
   "config/bash/inputrc:$HOME/.inputrc"
   "shell/.hushlogin:$HOME/.hushlogin"
+  "config/bash/bin/swarm:$HOME/.local/bin/swarm"
 )

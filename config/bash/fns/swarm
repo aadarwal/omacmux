@@ -1,0 +1,1636 @@
+# ==============================================================================
+# Swarm: Agent-to-agent interaction system
+# ==============================================================================
+#
+# Tracked swarms with messaging, output capture, and coordination topologies.
+# Works locally (same machine, multiple panes) and distributed (Tailscale mesh).
+#
+# Topologies:
+#   flat    - N equal workers, human orchestrates
+#   star    - 1 conductor + N-1 workers, conductor delegates autonomously
+#   pipe    - Sequential stages, each reads predecessor's output
+#   pair    - Coder + reviewer feedback loop
+#
+# Usage:
+#   swarm start 4 cx              # 4 local Claude agents (flat)
+#   swarm star 4 cx               # conductor + 3 workers
+#   swarm pipe 3 cx               # 3-stage pipeline
+#   swarm pair cx                 # coder + reviewer
+#   swarm mesh 3 cx               # distributed across Tailscale devices
+#   swarm send agent-2 "do X"     # message a specific agent
+#   swarm broadcast "do X"        # message all agents
+#   swarm capture agent-1         # capture agent's pane output
+#   swarm collect                 # aggregate all outputs
+#   swarm status                  # show agent status table
+#   swarm ls                      # list all swarms
+#   swarm kill                    # tear down current swarm
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+_swarm_state_dir() {
+  echo "$HOME/.local/share/omacmux/swarms"
+}
+
+# Get the swarm ID for the current window
+_swarm_current_id() {
+  tmux show-option -wqv @swarm_id 2>/dev/null
+}
+
+# Get the swarm state directory for the current window's swarm
+_swarm_dir() {
+  local id
+  id=$(_swarm_current_id)
+  [[ -z "$id" ]] && return 1
+  echo "$(_swarm_state_dir)/$id"
+}
+
+# Resolve current pane to its agent ID
+_swarm_whoami() {
+  local current_pane="$TMUX_PANE"
+  local pane_map
+  pane_map=$(tmux show-option -wqv @swarm_panes 2>/dev/null)
+  [[ -z "$pane_map" ]] && { echo "external"; return; }
+
+  for entry in ${pane_map//,/ }; do
+    local pane="${entry%%:*}"
+    local agent="${entry#*:}"
+    [[ "$pane" == "$current_pane" ]] && { echo "$agent"; return; }
+  done
+  echo "external"
+}
+
+# Resolve agent ID to its pane ID
+_swarm_agent_pane() {
+  local target="$1"
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || return 1
+
+  local agent_file="$swarm_dir/agents/$target.json"
+  [[ -f "$agent_file" ]] || return 1
+  jq -r '.pane_id' "$agent_file"
+}
+
+# Resolve agent ID to its device name
+_swarm_agent_device() {
+  local target="$1"
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || return 1
+
+  local agent_file="$swarm_dir/agents/$target.json"
+  [[ -f "$agent_file" ]] || return 1
+  jq -r '.device' "$agent_file"
+}
+
+# List agent IDs for a swarm directory (or current swarm)
+_swarm_agent_ids() {
+  local swarm_dir="${1:-$(_swarm_dir)}"
+  [[ -z "$swarm_dir" ]] && return 1
+  for f in "$swarm_dir/agents/"*.json; do
+    [[ -f "$f" ]] || continue
+    basename "$f" .json
+  done
+}
+
+# Generate a short swarm ID
+_swarm_gen_id() {
+  date +%s | shasum | head -c 8
+}
+
+# Source path for FZF subshells
+_swarm_src() {
+  echo "${OMACMUX_PATH:-$HOME/.local/share/omacmux}/config/bash/fns/swarm"
+}
+
+# ANSI color constants
+_swarm_colors() {
+  _sw_green='\033[32m'
+  _sw_dim='\033[2m'
+  _sw_bold='\033[1m'
+  _sw_cyan='\033[36m'
+  _sw_orange='\033[38;5;172m'
+  _sw_reset='\033[0m'
+}
+
+# Topology icon for a given topology name
+_swarm_topo_icon() {
+  case "$1" in
+    star) echo "★" ;;
+    pipe) echo "▸" ;;
+    pair) echo "⇄" ;;
+    mesh) echo "◆" ;;
+    mixed) echo "⊞" ;;
+    *)    echo "·" ;;
+  esac
+}
+
+# Check if an agent's pane is still alive
+_swarm_pane_alive() {
+  local agent="$1"
+  local device pane
+  device=$(_swarm_agent_device "$agent") || return 1
+  pane=$(_swarm_agent_pane "$agent") || return 1
+
+  if [[ "$device" == "local" ]]; then
+    tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx "$pane"
+  else
+    return 0  # assume remote panes alive (can't cheaply check)
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Topology diagram
+# ------------------------------------------------------------------------------
+
+# Render topology diagram for a swarm
+# Usage: _swarm_topology [swarm_dir]
+_swarm_topology() {
+  local swarm_dir="${1:-$(_swarm_dir)}"
+  [[ -z "$swarm_dir" || ! -d "$swarm_dir" ]] && return 1
+
+  _swarm_colors
+  local topology
+  topology=$(jq -r '.topology' "$swarm_dir/swarm.json")
+
+  # Collect agent info
+  local -a ids roles devices
+  for f in "$swarm_dir/agents/"*.json; do
+    [[ -f "$f" ]] || continue
+    ids+=($(jq -r '.id' "$f"))
+    roles+=($(jq -r '.role' "$f"))
+    devices+=($(jq -r '.device' "$f"))
+  done
+
+  local n=${#ids[@]}
+  (( n == 0 )) && return
+
+  case "$topology" in
+    star)
+      # Tree style: conductor at root, workers as children
+      local indicator
+      if _swarm_pane_alive "${ids[0]}"; then
+        indicator="${_sw_green}●${_sw_reset}"
+      else
+        indicator="${_sw_dim}○${_sw_reset}"
+      fi
+      printf "  ${indicator} ${_sw_bold}${_sw_cyan}%s${_sw_reset} (${_sw_orange}%s${_sw_reset})\n" "${ids[0]}" "${roles[0]}"
+
+      for ((i=1; i<n; i++)); do
+        if _swarm_pane_alive "${ids[$i]}"; then
+          indicator="${_sw_green}●${_sw_reset}"
+        else
+          indicator="${_sw_dim}○${_sw_reset}"
+        fi
+        local branch="├──"
+        (( i == n-1 )) && branch="└──"
+        local dev_tag=""
+        [[ "${devices[$i]}" != "local" ]] && dev_tag=", ${devices[$i]}"
+        printf "  %s ${indicator} %s (%s%s)\n" "$branch" "${ids[$i]}" "${roles[$i]}" "$dev_tag"
+      done
+      ;;
+
+    pipe)
+      local line="  "
+      for ((i=0; i<n; i++)); do
+        local indicator
+        if _swarm_pane_alive "${ids[$i]}"; then
+          indicator="${_sw_green}●${_sw_reset}"
+        else
+          indicator="${_sw_dim}○${_sw_reset}"
+        fi
+        line+="${indicator} ${ids[$i]} (${roles[$i]})"
+        (( i < n-1 )) && line+=" ${_sw_orange}──▶${_sw_reset} "
+      done
+      echo -e "$line"
+      ;;
+
+    pair)
+      local ind1 ind2
+      if _swarm_pane_alive "${ids[0]}"; then ind1="${_sw_green}●${_sw_reset}"; else ind1="${_sw_dim}○${_sw_reset}"; fi
+      if _swarm_pane_alive "${ids[1]}"; then ind2="${_sw_green}●${_sw_reset}"; else ind2="${_sw_dim}○${_sw_reset}"; fi
+      printf "  %b %s (%s) ${_sw_orange}◄──▶${_sw_reset} %b %s (%s)\n" \
+        "$ind1" "${ids[0]}" "${roles[0]}" "$ind2" "${ids[1]}" "${roles[1]}"
+      ;;
+
+    *)
+      # Flat / mesh: inline list
+      local line="  "
+      for ((i=0; i<n; i++)); do
+        local indicator
+        if _swarm_pane_alive "${ids[$i]}"; then
+          indicator="${_sw_green}●${_sw_reset}"
+        else
+          indicator="${_sw_dim}○${_sw_reset}"
+        fi
+        local dev_tag=""
+        [[ "${devices[$i]}" != "local" ]] && dev_tag=" @${devices[$i]}"
+        line+="${indicator} ${ids[$i]}${dev_tag}   "
+      done
+      echo -e "$line"
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Transport layer (unified local/remote)
+# ------------------------------------------------------------------------------
+
+# Send keystrokes to an agent's pane (local or remote via Tailscale)
+_swarm_send_keys() {
+  local agent="$1" && shift
+  local text="$*"
+  local device pane
+
+  device=$(_swarm_agent_device "$agent") || return 1
+  pane=$(_swarm_agent_pane "$agent") || return 1
+
+  if [[ "$device" == "local" ]]; then
+    tmux send-keys -t "$pane" "$text" C-m
+  else
+    tailscale ssh "$device" -- tmux send-keys -t "$pane" "$text" C-m
+  fi
+}
+
+# Capture visible pane output from an agent (local or remote)
+_swarm_capture_pane() {
+  local agent="$1"
+  local device pane
+
+  device=$(_swarm_agent_device "$agent") || return 1
+  pane=$(_swarm_agent_pane "$agent") || return 1
+
+  if [[ "$device" == "local" ]]; then
+    tmux capture-pane -t "$pane" -p
+  else
+    tailscale ssh "$device" -- tmux capture-pane -t "$pane" -p
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Swarm lifecycle
+# ------------------------------------------------------------------------------
+
+# Create a flat swarm: N local tiled panes running the same command
+# Usage: swarm start <count> <command> [--name NAME]
+_swarm_start() {
+  local count="" cmd="" name=""
+
+  # Parse args
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      *)
+        if [[ -z "$count" ]]; then count="$1"
+        elif [[ -z "$cmd" ]]; then cmd="$1"
+        else echo "swarm start: unexpected arg '$1'"; return 1
+        fi
+        shift ;;
+    esac
+  done
+
+  [[ -z "$count" || -z "$cmd" ]] && { echo "Usage: swarm start <count> <command> [--name NAME]"; return 1; }
+  [[ -z $TMUX ]] && { echo "swarm start requires tmux."; return 1; }
+
+  local swarm_id
+  swarm_id=$(_swarm_gen_id)
+  local swarm_dir="$(_swarm_state_dir)/$swarm_id"
+  [[ -z "$name" ]] && name="swarm-$swarm_id"
+
+  # Create state directories
+  mkdir -p "$swarm_dir"/{agents,mailbox/shared,results}
+
+  # Create tiled panes (reusing tsl pattern)
+  local current_dir="${PWD}"
+  local -a panes
+  tmux rename-window -t "$TMUX_PANE" "$name"
+  panes+=("$TMUX_PANE")
+
+  while (( ${#panes[@]} < count )); do
+    local new_pane
+    local split_target="${panes[-1]}"
+    new_pane=$(tmux split-window -h -t "$split_target" -c "$current_dir" -P -F '#{pane_id}')
+    panes+=("$new_pane")
+    tmux select-layout -t "${panes[0]}" tiled
+  done
+
+  # Register agents and build pane map
+  local pane_map=""
+  for ((i=0; i<${#panes[@]}; i++)); do
+    local agent_id="agent-$((i+1))"
+    local pane_id="${panes[$i]}"
+
+    mkdir -p "$swarm_dir/mailbox/$agent_id"
+
+    cat > "$swarm_dir/agents/$agent_id.json" <<EOF
+{
+  "id": "$agent_id",
+  "pane_id": "$pane_id",
+  "role": "worker",
+  "command": "$cmd",
+  "device": "local",
+  "remote_pane": null,
+  "status": "active",
+  "started": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
+    [[ -n "$pane_map" ]] && pane_map+=","
+    pane_map+="$pane_id:$agent_id"
+  done
+
+  # Write swarm metadata
+  local window_id
+  window_id=$(tmux display-message -p '#{window_id}')
+  local session
+  session=$(tmux display-message -p '#{session_name}')
+
+  cat > "$swarm_dir/swarm.json" <<EOF
+{
+  "id": "$swarm_id",
+  "name": "$name",
+  "topology": "flat",
+  "hub": "local",
+  "status": "running",
+  "conductor": null,
+  "working_dir": "$current_dir",
+  "window_id": "$window_id",
+  "session": "$session",
+  "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "agents": [$(printf '"%s",' $(seq -f 'agent-%.0f' 1 ${#panes[@]}) | sed 's/,$//')]
+}
+EOF
+
+  # Store on tmux window
+  tmux set-option -w @swarm_id "$swarm_id"
+  tmux set-option -w @swarm_panes "$pane_map"
+
+  # Launch command in all panes
+  for pane in "${panes[@]}"; do
+    tmux send-keys -t "$pane" "$cmd" C-m
+  done
+
+  tmux select-pane -t "${panes[0]}"
+  echo "swarm: created '$name' ($swarm_id) with ${#panes[@]} agents [flat]"
+}
+
+# Mixed swarm: different commands in count/command pairs
+# Usage: swarm mixed <count1> <cmd1> [count2] [cmd2] ... [--name NAME]
+# Example: swarm mixed 1 bash 2 cx --name hybrid
+_swarm_mixed() {
+  local -a counts cmds
+  local name=""
+
+  # Parse args: count/cmd pairs + optional --name
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      *)
+        if [[ "$1" =~ ^[0-9]+$ ]] && [[ $# -ge 2 && "$2" != "--name" ]]; then
+          counts+=("$1")
+          cmds+=("$2")
+          shift 2
+        else
+          echo "swarm mixed: unexpected arg '$1'. Args must be count/command pairs."
+          echo "Usage: swarm mixed <count1> <cmd1> [count2] [cmd2] ... [--name NAME]"
+          return 1
+        fi
+        ;;
+    esac
+  done
+
+  (( ${#cmds[@]} < 1 )) && { echo "Usage: swarm mixed <count1> <cmd1> [count2] [cmd2] ... [--name NAME]"; return 1; }
+  [[ -z $TMUX ]] && { echo "swarm mixed requires tmux."; return 1; }
+
+  # Calculate total
+  local total=0
+  for c in "${counts[@]}"; do (( total += c )); done
+  (( total < 1 )) && { echo "swarm mixed: need at least 1 agent."; return 1; }
+
+  local swarm_id
+  swarm_id=$(_swarm_gen_id)
+  local swarm_dir="$(_swarm_state_dir)/$swarm_id"
+  [[ -z "$name" ]] && name="mixed-$swarm_id"
+
+  mkdir -p "$swarm_dir"/{agents,mailbox/shared,results}
+
+  # Create tiled panes
+  local current_dir="${PWD}"
+  local -a panes
+  tmux rename-window -t "$TMUX_PANE" "$name"
+  panes+=("$TMUX_PANE")
+
+  while (( ${#panes[@]} < total )); do
+    local new_pane split_target="${panes[-1]}"
+    new_pane=$(tmux split-window -h -t "$split_target" -c "$current_dir" -P -F '#{pane_id}')
+    panes+=("$new_pane")
+    tmux select-layout -t "${panes[0]}" tiled
+  done
+
+  # Build command-per-pane mapping
+  local -a pane_cmds
+  for ((g=0; g<${#cmds[@]}; g++)); do
+    for ((i=0; i<${counts[$g]}; i++)); do
+      pane_cmds+=("${cmds[$g]}")
+    done
+  done
+
+  # Register agents
+  local pane_map=""
+  for ((i=0; i<${#panes[@]}; i++)); do
+    local agent_id="agent-$((i+1))"
+    local pane_id="${panes[$i]}"
+    local cmd="${pane_cmds[$i]}"
+
+    mkdir -p "$swarm_dir/mailbox/$agent_id"
+
+    cat > "$swarm_dir/agents/$agent_id.json" <<EOF
+{
+  "id": "$agent_id",
+  "pane_id": "$pane_id",
+  "role": "worker",
+  "command": "$cmd",
+  "device": "local",
+  "remote_pane": null,
+  "status": "active",
+  "started": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
+    [[ -n "$pane_map" ]] && pane_map+=","
+    pane_map+="$pane_id:$agent_id"
+  done
+
+  # Write swarm metadata
+  local window_id session
+  window_id=$(tmux display-message -p '#{window_id}')
+  session=$(tmux display-message -p '#{session_name}')
+
+  local cmd_summary=""
+  for ((g=0; g<${#cmds[@]}; g++)); do
+    [[ -n "$cmd_summary" ]] && cmd_summary+=" + "
+    cmd_summary+="${counts[$g]}×${cmds[$g]}"
+  done
+
+  cat > "$swarm_dir/swarm.json" <<EOF
+{
+  "id": "$swarm_id",
+  "name": "$name",
+  "topology": "mixed",
+  "hub": "local",
+  "status": "running",
+  "conductor": null,
+  "working_dir": "$current_dir",
+  "window_id": "$window_id",
+  "session": "$session",
+  "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "agents": [$(printf '"%s",' $(seq -f 'agent-%.0f' 1 ${#panes[@]}) | sed 's/,$//')]
+}
+EOF
+
+  tmux set-option -w @swarm_id "$swarm_id"
+  tmux set-option -w @swarm_panes "$pane_map"
+
+  # Launch commands per pane
+  for ((i=0; i<${#panes[@]}; i++)); do
+    tmux send-keys -t "${panes[$i]}" "${pane_cmds[$i]}" C-m
+  done
+
+  tmux select-pane -t "${panes[0]}"
+  echo "swarm: created '$name' ($swarm_id) with $total agents [$cmd_summary]"
+}
+
+# Kill a swarm and clean up
+# Usage: swarm kill [swarm_id|name]
+# Resolve a swarm name or ID to its ID
+_swarm_resolve_id() {
+  local input="$1"
+  local state_dir
+  state_dir=$(_swarm_state_dir)
+
+  # Direct ID match
+  [[ -d "$state_dir/$input" ]] && { echo "$input"; return; }
+
+  # Name match
+  for swarm_file in "$state_dir"/*/swarm.json; do
+    [[ -f "$swarm_file" ]] || continue
+    local id name
+    id=$(jq -r '.id' "$swarm_file")
+    name=$(jq -r '.name' "$swarm_file")
+    [[ "$name" == "$input" ]] && { echo "$id"; return; }
+  done
+
+  return 1
+}
+
+_swarm_kill() {
+  local input="${1:-$(_swarm_current_id)}"
+  [[ -z "$input" ]] && { echo "swarm kill: no active swarm in this window."; return 1; }
+
+  local swarm_id
+  swarm_id=$(_swarm_resolve_id "$input") || { echo "swarm kill: swarm '$input' not found."; return 1; }
+
+  local swarm_dir="$(_swarm_state_dir)/$swarm_id"
+
+  local name
+  name=$(jq -r '.name // "unknown"' "$swarm_dir/swarm.json" 2>/dev/null)
+
+  # Kill agent panes (skip current pane)
+  for agent_file in "$swarm_dir/agents/"*.json; do
+    [[ -f "$agent_file" ]] || continue
+    local device pane_id
+    device=$(jq -r '.device' "$agent_file")
+    pane_id=$(jq -r '.pane_id' "$agent_file")
+
+    if [[ "$device" == "local" ]]; then
+      [[ "$pane_id" != "$TMUX_PANE" ]] && tmux kill-pane -t "$pane_id" 2>/dev/null
+    else
+      tailscale ssh "$device" -- tmux kill-pane -t "$pane_id" 2>/dev/null
+    fi
+  done
+
+  # Clean up state
+  rm -rf "$swarm_dir"
+
+  # Clear window options if this is the current swarm
+  if [[ "$swarm_id" == "$(_swarm_current_id)" ]]; then
+    tmux set-option -wu @swarm_id 2>/dev/null
+    tmux set-option -wu @swarm_panes 2>/dev/null
+  fi
+
+  echo "swarm: killed '$name' ($swarm_id)"
+}
+
+# List all active swarms with colored indicators
+_swarm_ls() {
+  local state_dir
+  state_dir=$(_swarm_state_dir)
+
+  if [[ ! -d "$state_dir" ]] || [[ -z "$(command ls -A "$state_dir" 2>/dev/null)" ]]; then
+    echo "No active swarms."
+    return
+  fi
+
+  _swarm_colors
+  local current_id
+  current_id=$(_swarm_current_id)
+
+  printf "\n  ${_sw_bold}%-22s %-10s %-8s %-6s %-18s %s${_sw_reset}\n" \
+    "NAME" "ID" "TOPOLOGY" "AGENTS" "CREATED" ""
+  for swarm_file in "$state_dir"/*/swarm.json; do
+    [[ -f "$swarm_file" ]] || continue
+    local id name topology agent_count created window_id indicator suffix topo_icon
+    id=$(jq -r '.id' "$swarm_file")
+    name=$(jq -r '.name' "$swarm_file")
+    topology=$(jq -r '.topology' "$swarm_file")
+    agent_count=$(jq -r '.agents | length' "$swarm_file")
+    created=$(jq -r '.created' "$swarm_file" | cut -c1-16)
+    window_id=$(jq -r '.window_id' "$swarm_file")
+    topo_icon=$(_swarm_topo_icon "$topology")
+
+    # Check if window still exists
+    if tmux list-windows -a -F '#{window_id}' 2>/dev/null | grep -qx "$window_id"; then
+      indicator="${_sw_green}●${_sw_reset}"
+    else
+      indicator="${_sw_dim}○${_sw_reset}"
+    fi
+
+    suffix=""
+    if [[ "$id" == "$current_id" ]]; then
+      suffix="${_sw_dim}(this window)${_sw_reset}"
+    fi
+
+    printf "  ${indicator} %-22s ${_sw_dim}%-10s${_sw_reset} ${_sw_orange}%s${_sw_reset}%-5s %-6s %-18s %b\n" \
+      "$name" "$id" "$topo_icon" "$topology" "$agent_count" "$created" "$suffix"
+  done
+  echo ""
+}
+
+# ------------------------------------------------------------------------------
+# Communication
+# ------------------------------------------------------------------------------
+
+# Send a message to a specific agent (dual-channel: mailbox + pane injection)
+# Usage: swarm send <agent-id> <message...>
+_swarm_send() {
+  local target="$1" && shift
+  local message="$*"
+
+  [[ -z "$target" || -z "$message" ]] && { echo "Usage: swarm send <agent-id> <message>"; return 1; }
+
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm send: no active swarm in this window."; return 1; }
+
+  # Validate target exists
+  [[ -f "$swarm_dir/agents/$target.json" ]] || { echo "swarm send: agent '$target' not found."; return 1; }
+
+  local sender
+  sender=$(_swarm_whoami)
+
+  # Write to mailbox (persistence)
+  local mailbox="$swarm_dir/mailbox/$target"
+  mkdir -p "$mailbox"
+  local seq
+  seq=$(find "$mailbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+  seq=$(printf "%03d" $((seq + 1)))
+
+  cat > "$mailbox/$seq.msg" <<EOF
+FROM: $sender
+TO: $target
+TIME: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+---
+$message
+EOF
+
+  # Inject into pane (immediacy)
+  _swarm_send_keys "$target" "$message"
+  echo "swarm: sent to $target"
+}
+
+# Broadcast message to all agents in the current swarm
+# Usage: swarm broadcast <message...>
+_swarm_broadcast() {
+  local message="$*"
+  [[ -z "$message" ]] && { echo "Usage: swarm broadcast <message>"; return 1; }
+
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm broadcast: no active swarm."; return 1; }
+
+  local sender
+  sender=$(_swarm_whoami)
+  local count=0
+
+  for agent_id in $(_swarm_agent_ids); do
+    [[ "$agent_id" == "$sender" ]] && continue
+
+    # Write to mailbox
+    local mailbox="$swarm_dir/mailbox/$agent_id"
+    mkdir -p "$mailbox"
+    local seq
+    seq=$(find "$mailbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+    seq=$(printf "%03d" $((seq + 1)))
+
+    cat > "$mailbox/$seq.msg" <<EOF
+FROM: $sender
+TO: $agent_id
+TIME: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+---
+$message
+EOF
+
+    # Inject into pane
+    _swarm_send_keys "$agent_id" "$message" 2>/dev/null && (( count++ ))
+  done
+
+  echo "swarm: broadcast to $count agent(s)."
+}
+
+# Read messages in an agent's mailbox
+# Usage: swarm read [agent-id]
+_swarm_read() {
+  local target="${1:-$(_swarm_whoami)}"
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm read: no active swarm."; return 1; }
+
+  local mailbox="$swarm_dir/mailbox/$target"
+  if [[ ! -d "$mailbox" ]] || ! compgen -G "$mailbox/*.msg" >/dev/null 2>&1; then
+    echo "swarm: no messages for $target."
+    return
+  fi
+
+  for msg in "$mailbox"/*.msg; do
+    echo "--- $(basename "$msg") ---"
+    cat "$msg"
+    echo ""
+  done
+}
+
+# ------------------------------------------------------------------------------
+# Output capture
+# ------------------------------------------------------------------------------
+
+# Capture an agent's visible pane output to results/
+# Usage: swarm capture <agent-id>
+_swarm_capture() {
+  local agent="$1"
+  [[ -z "$agent" ]] && { echo "Usage: swarm capture <agent-id>"; return 1; }
+
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm capture: no active swarm."; return 1; }
+
+  [[ -f "$swarm_dir/agents/$agent.json" ]] || { echo "swarm capture: agent '$agent' not found."; return 1; }
+
+  _swarm_capture_pane "$agent" > "$swarm_dir/results/$agent.md"
+  echo "swarm: captured $agent → results/$agent.md"
+}
+
+# Inspect an agent: capture pane output + show mailbox
+# Usage: swarm inspect <agent-id>
+_swarm_inspect() {
+  local agent="$1"
+  [[ -z "$agent" ]] && { echo "Usage: swarm inspect <agent-id>"; return 1; }
+
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm inspect: no active swarm."; return 1; }
+  [[ -f "$swarm_dir/agents/$agent.json" ]] || { echo "swarm inspect: agent '$agent' not found."; return 1; }
+
+  _swarm_colors
+  local role device cmd
+  role=$(jq -r '.role' "$swarm_dir/agents/$agent.json")
+  device=$(jq -r '.device' "$swarm_dir/agents/$agent.json")
+  cmd=$(jq -r '.command' "$swarm_dir/agents/$agent.json")
+
+  printf "\n  ${_sw_bold}${_sw_cyan}%s${_sw_reset}  %s · %s · %s\n" "$agent" "$role" "$cmd" "$device"
+  echo "  ──────────────────────────────────────────────────"
+
+  # Pane output
+  printf "\n  ${_sw_bold}PANE OUTPUT${_sw_reset}\n"
+  local output
+  output=$(_swarm_capture_pane "$agent" 2>/dev/null | grep -v '^$' | tail -20)
+  if [[ -n "$output" ]]; then
+    echo "$output" | while IFS= read -r line; do printf "  %s\n" "$line"; done
+  else
+    printf "  ${_sw_dim}(no output)${_sw_reset}\n"
+  fi
+
+  # Save capture
+  _swarm_capture_pane "$agent" > "$swarm_dir/results/$agent.md" 2>/dev/null
+
+  # Mailbox
+  local mailbox="$swarm_dir/mailbox/$agent"
+  if compgen -G "$mailbox/*.msg" >/dev/null 2>&1; then
+    printf "\n  ${_sw_bold}MAILBOX${_sw_reset}\n"
+    for msg in "$mailbox"/*.msg; do
+      local from time body
+      from=$(head -1 "$msg" | sed 's/^FROM: //')
+      time=$(sed -n '3p' "$msg" | sed 's/^TIME: //' | cut -c12-16)
+      body=$(sed '1,/^---$/d' "$msg" | head -1 | cut -c1-60)
+      printf "  ${_sw_dim}%s${_sw_reset}  %-12s %s\n" "$time" "$from" "$body"
+    done
+  else
+    printf "\n  ${_sw_bold}MAILBOX${_sw_reset}\n"
+    printf "  ${_sw_dim}(no messages)${_sw_reset}\n"
+  fi
+  echo ""
+}
+
+# Capture all agents and concatenate into summary.md
+_swarm_collect() {
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm collect: no active swarm."; return 1; }
+
+  local count=0
+  {
+    echo "# Swarm Results"
+    echo "Collected: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo ""
+
+    for agent_id in $(_swarm_agent_ids); do
+      local role device
+      role=$(jq -r '.role' "$swarm_dir/agents/$agent_id.json")
+      device=$(jq -r '.device' "$swarm_dir/agents/$agent_id.json")
+
+      _swarm_capture_pane "$agent_id" > "$swarm_dir/results/$agent_id.md" 2>/dev/null
+
+      echo "## $agent_id ($role, $device)"
+      echo '```'
+      cat "$swarm_dir/results/$agent_id.md" 2>/dev/null
+      echo '```'
+      echo ""
+      (( count++ ))
+    done
+  } > "$swarm_dir/summary.md"
+
+  echo "swarm: collected $count agent(s) → summary.md"
+  echo "  $swarm_dir/summary.md"
+}
+
+# Show status of agents in the current swarm (or by ID)
+# Usage: swarm status [swarm_id]
+_swarm_status() {
+  _swarm_status_by_id "${1:-$(_swarm_current_id)}"
+}
+
+# Render full status view for a given swarm ID
+_swarm_status_by_id() {
+  local swarm_id="$1"
+  [[ -z "$swarm_id" ]] && { echo "swarm status: no active swarm in this window."; return 1; }
+
+  local swarm_dir="$(_swarm_state_dir)/$swarm_id"
+  [[ -d "$swarm_dir" ]] || { echo "swarm status: swarm '$swarm_id' not found."; return 1; }
+
+  _swarm_colors
+
+  local swarm_name topology agent_count topo_icon
+  swarm_name=$(jq -r '.name' "$swarm_dir/swarm.json")
+  topology=$(jq -r '.topology' "$swarm_dir/swarm.json")
+  agent_count=$(jq -r '.agents | length' "$swarm_dir/swarm.json")
+  topo_icon=$(_swarm_topo_icon "$topology")
+
+  # Header
+  printf "\n  ${_sw_bold}${_sw_cyan}%s${_sw_reset}  ${_sw_orange}[%s %s]${_sw_reset}  ·  %s agents\n" \
+    "$swarm_name" "$topo_icon" "$topology" "$agent_count"
+  echo "  ──────────────────────────────────────────────────"
+  echo ""
+
+  # Topology diagram
+  printf "  ${_sw_bold}TOPOLOGY${_sw_reset}\n"
+  _swarm_topology "$swarm_dir"
+  echo ""
+
+  # Agent table
+  printf "  ${_sw_bold}AGENTS${_sw_reset}\n"
+  printf "  ${_sw_bold}%-12s %-12s %-10s %-8s %s${_sw_reset}\n" \
+    "AGENT" "ROLE" "DEVICE" "PANE" "MSGS"
+
+  for agent_id in $(_swarm_agent_ids "$swarm_dir"); do
+    local role device pane_id msg_count indicator
+    role=$(jq -r '.role' "$swarm_dir/agents/$agent_id.json")
+    device=$(jq -r '.device' "$swarm_dir/agents/$agent_id.json")
+    pane_id=$(jq -r '.pane_id' "$swarm_dir/agents/$agent_id.json")
+    msg_count=$(find "$swarm_dir/mailbox/$agent_id" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+
+    if _swarm_pane_alive "$agent_id"; then
+      indicator="${_sw_green}●${_sw_reset}"
+    else
+      indicator="${_sw_dim}○${_sw_reset}"
+    fi
+
+    printf "  ${indicator} %-12s %-12s %-10s %-8s %s\n" \
+      "$agent_id" "$role" "$device" "$pane_id" "$msg_count"
+  done
+  echo ""
+
+  # Recent messages (last 5 across all mailboxes)
+  local -a msg_lines
+  for agent_id in $(_swarm_agent_ids "$swarm_dir"); do
+    for msg_file in "$swarm_dir/mailbox/$agent_id"/*.msg; do
+      [[ -f "$msg_file" ]] || continue
+      local from to time body
+      from=$(head -1 "$msg_file" | sed 's/^FROM: //')
+      to=$(sed -n '2p' "$msg_file" | sed 's/^TO: //')
+      time=$(sed -n '3p' "$msg_file" | sed 's/^TIME: //' | cut -c12-16)
+      body=$(sed '1,/^---$/d' "$msg_file" | head -1 | cut -c1-50)
+      local mtime
+      mtime=$(stat -f %m "$msg_file" 2>/dev/null || stat -c %Y "$msg_file" 2>/dev/null)
+      msg_lines+=("${mtime}|${from} → ${to}|${body}|${time}")
+    done
+  done
+
+  if (( ${#msg_lines[@]} > 0 )); then
+    printf "  ${_sw_bold}RECENT MESSAGES${_sw_reset}\n"
+    printf '%s\n' "${msg_lines[@]}" | sort -t'|' -k1 -rn | head -5 | while IFS='|' read -r _ route body time; do
+      printf "  ${_sw_dim}%s${_sw_reset}  %-24s %s\n" "$time" "$route" "$body"
+    done
+    echo ""
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Topologies + bootstrap prompts
+# ------------------------------------------------------------------------------
+
+# Bootstrap a conductor agent with swarm awareness
+_swarm_bootstrap_conductor() {
+  local agent_id="$1"
+  local swarm_dir="$2"
+  local swarm_id="$3"
+
+  # Build worker list
+  local workers=""
+  for aid in $(_swarm_agent_ids); do
+    [[ "$aid" == "$agent_id" ]] && continue
+    local dev
+    dev=$(jq -r '.device' "$swarm_dir/agents/$aid.json")
+    [[ -n "$workers" ]] && workers+=", "
+    workers+="$aid ($dev)"
+  done
+
+  local mailbox_base="$swarm_dir/mailbox"
+  local results_base="$swarm_dir/results"
+
+  local prompt="You are the conductor of a swarm of AI agents. Your job is to decompose tasks and delegate to workers by running bash commands.
+
+WORKERS: $workers
+
+IMPORTANT: To delegate a task, you MUST run this bash command for each worker:
+$(for aid in $(_swarm_agent_ids "$swarm_dir"); do
+    [[ "$aid" == "$agent_id" ]] && continue
+    echo "  swarm send $aid \"YOUR TASK DESCRIPTION HERE\""
+  done)
+
+This delivers the task directly to the worker's terminal. You must actually run the command, not just describe it.
+
+To check a worker's results: cat $results_base/<agent-id>.md
+When all done, write the final synthesis to: $swarm_dir/summary.md
+
+Now wait for a task. When you receive one, immediately decompose it and run the swarm send commands to delegate."
+
+  _swarm_send_keys "$agent_id" "$prompt"
+}
+
+# Bootstrap a worker agent
+_swarm_bootstrap_worker() {
+  local agent_id="$1"
+  local swarm_dir="$2"
+
+  local prompt="You are $agent_id, a worker in a swarm. A conductor will send you tasks directly in this terminal. When you receive a task, execute it immediately. When done, write a summary of what you accomplished to: $swarm_dir/results/$agent_id.md"
+
+  _swarm_send_keys "$agent_id" "$prompt"
+}
+
+# Bootstrap a pipeline stage
+_swarm_bootstrap_stage() {
+  local agent_id="$1"
+  local stage_num="$2"
+  local total_stages="$3"
+  local swarm_dir="$4"
+  local swarm_id="$5"
+
+  local results="$swarm_dir/results"
+
+  local prompt="You are stage $stage_num of $total_stages in a pipeline. IMPORTANT: You must use your tools to write files, not just respond with text."
+
+  if (( stage_num == 1 )); then
+    prompt+="
+
+You are the FIRST stage. When you receive a task, do the work and then WRITE your output by running:
+  cat > $results/$agent_id.md << 'RESULT'
+  (your full output here)
+  RESULT
+
+You MUST run this command to write the file. The next stage cannot proceed without it."
+  else
+    local prev=$((stage_num - 1))
+    prompt+="
+
+WORKFLOW:
+1. Read the previous stage's output by running: cat $results/agent-$prev.md
+2. Do your work based on that input
+3. WRITE your output by running: cat > $results/$agent_id.md << 'RESULT'
+   (your full output here)
+   RESULT
+
+You MUST actually run these commands. Wait for instructions, then check for the previous stage's output."
+  fi
+
+  if (( stage_num == total_stages )); then
+    prompt+=" You are the FINAL stage -- your output is the pipeline's final result."
+  fi
+
+  _swarm_send_keys "$agent_id" "$prompt"
+}
+
+# Bootstrap a review pair (coder or reviewer)
+_swarm_bootstrap_pair() {
+  local agent_id="$1"
+  local role="$2"  # "coder" or "reviewer"
+  local swarm_dir="$3"
+
+  local prompt
+  if [[ "$role" == "coder" ]]; then
+    prompt="You are the CODER in a coder-reviewer pair. When you receive a task, implement it. When done, you MUST run this command to save your work summary:
+  cat > $swarm_dir/results/$agent_id.md << 'RESULT'
+  (describe what you built and where the files are)
+  RESULT
+
+Then run: swarm send agent-2 \"Code complete, please review. Summary in $swarm_dir/results/$agent_id.md\"
+
+Wait for a task now."
+  else
+    prompt="You are the REVIEWER in a coder-reviewer pair. The coder will notify you when their work is ready.
+
+When notified, review by running: cat $swarm_dir/results/agent-1.md
+Then review the actual code files they mention. Write your feedback by running:
+  swarm send agent-1 \"YOUR REVIEW FEEDBACK HERE\"
+
+Also save your review: cat > $swarm_dir/results/$agent_id.md << 'RESULT'
+(your review notes)
+RESULT
+
+Wait for the coder to notify you."
+  fi
+
+  _swarm_send_keys "$agent_id" "$prompt"
+}
+
+# Create a star topology swarm: 1 conductor + N-1 workers
+# Usage: swarm star <count> <command> [--name NAME]
+_swarm_star() {
+  local count="" cmd="" name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      *)
+        if [[ -z "$count" ]]; then count="$1"
+        elif [[ -z "$cmd" ]]; then cmd="$1"
+        fi
+        shift ;;
+    esac
+  done
+
+  [[ -z "$count" || -z "$cmd" ]] && { echo "Usage: swarm star <count> <command> [--name NAME]"; return 1; }
+  (( count < 2 )) && { echo "swarm star: need at least 2 agents (1 conductor + 1 worker)."; return 1; }
+
+  # Create the flat swarm first
+  _swarm_start "$count" "$cmd" ${name:+--name "$name"}
+
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || return 1
+  local swarm_id
+  swarm_id=$(_swarm_current_id)
+
+  # Update topology and roles
+  local tmp
+  tmp=$(jq '.topology = "star" | .conductor = "agent-1"' "$swarm_dir/swarm.json")
+  echo "$tmp" > "$swarm_dir/swarm.json"
+
+  tmp=$(jq '.role = "conductor"' "$swarm_dir/agents/agent-1.json")
+  echo "$tmp" > "$swarm_dir/agents/agent-1.json"
+
+  # Wait for agents to start, then bootstrap
+  sleep 4
+
+  _swarm_bootstrap_conductor "agent-1" "$swarm_dir" "$swarm_id"
+
+  for agent_id in $(_swarm_agent_ids); do
+    [[ "$agent_id" == "agent-1" ]] && continue
+    _swarm_bootstrap_worker "$agent_id" "$swarm_dir"
+  done
+
+  echo "swarm: topology set to star (agent-1 = conductor)"
+}
+
+# Create a pipeline topology swarm
+# Usage: swarm pipe <count> <command> [--name NAME]
+_swarm_pipe() {
+  local count="" cmd="" name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      *)
+        if [[ -z "$count" ]]; then count="$1"
+        elif [[ -z "$cmd" ]]; then cmd="$1"
+        fi
+        shift ;;
+    esac
+  done
+
+  [[ -z "$count" || -z "$cmd" ]] && { echo "Usage: swarm pipe <count> <command> [--name NAME]"; return 1; }
+  (( count < 2 )) && { echo "swarm pipe: need at least 2 stages."; return 1; }
+
+  _swarm_start "$count" "$cmd" ${name:+--name "$name"}
+
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || return 1
+  local swarm_id
+  swarm_id=$(_swarm_current_id)
+
+  # Update topology and roles
+  local tmp
+  tmp=$(jq '.topology = "pipe"' "$swarm_dir/swarm.json")
+  echo "$tmp" > "$swarm_dir/swarm.json"
+
+  for ((i=1; i<=count; i++)); do
+    local agent_id="agent-$i"
+    tmp=$(jq --arg r "stage-$i" '.role = $r' "$swarm_dir/agents/$agent_id.json")
+    echo "$tmp" > "$swarm_dir/agents/$agent_id.json"
+  done
+
+  sleep 4
+
+  for ((i=1; i<=count; i++)); do
+    _swarm_bootstrap_stage "agent-$i" "$i" "$count" "$swarm_dir" "$swarm_id"
+  done
+
+  echo "swarm: topology set to pipe ($count stages)"
+}
+
+# Create a review pair: coder + reviewer
+# Usage: swarm pair <command> [--name NAME]
+_swarm_pair() {
+  local cmd="" name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      *)
+        if [[ -z "$cmd" ]]; then cmd="$1"; fi
+        shift ;;
+    esac
+  done
+
+  [[ -z "$cmd" ]] && { echo "Usage: swarm pair <command> [--name NAME]"; return 1; }
+
+  _swarm_start 2 "$cmd" ${name:+--name "$name"}
+
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || return 1
+
+  # Update topology and roles
+  local tmp
+  tmp=$(jq '.topology = "pair"' "$swarm_dir/swarm.json")
+  echo "$tmp" > "$swarm_dir/swarm.json"
+
+  tmp=$(jq '.role = "coder"' "$swarm_dir/agents/agent-1.json")
+  echo "$tmp" > "$swarm_dir/agents/agent-1.json"
+  tmp=$(jq '.role = "reviewer"' "$swarm_dir/agents/agent-2.json")
+  echo "$tmp" > "$swarm_dir/agents/agent-2.json"
+
+  sleep 4
+
+  _swarm_bootstrap_pair "agent-1" "coder" "$swarm_dir"
+  _swarm_bootstrap_pair "agent-2" "reviewer" "$swarm_dir"
+
+  echo "swarm: topology set to pair (agent-1 = coder, agent-2 = reviewer)"
+}
+
+# ------------------------------------------------------------------------------
+# Distributed mesh swarm
+# ------------------------------------------------------------------------------
+
+# Create a swarm distributed across Tailscale mesh devices
+# Usage: swarm mesh <count> <command> [--name NAME]
+_swarm_mesh() {
+  local count="" cmd="" name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      *)
+        if [[ -z "$count" ]]; then count="$1"
+        elif [[ -z "$cmd" ]]; then cmd="$1"
+        fi
+        shift ;;
+    esac
+  done
+
+  [[ -z "$count" || -z "$cmd" ]] && { echo "Usage: swarm mesh <count> <command> [--name NAME]"; return 1; }
+  [[ -z $TMUX ]] && { echo "swarm mesh requires tmux."; return 1; }
+
+  # Check mesh functions are available
+  command -v _mesh_picks &>/dev/null || { echo "swarm mesh: mesh system not available."; return 1; }
+
+  # Pick devices
+  echo "Select $count device(s) for the swarm:"
+  local -a devices
+  while IFS=$'\t' read -r dev_name _; do
+    devices+=("$dev_name")
+  done < <(_mesh_picks)
+
+  if (( ${#devices[@]} < 1 )); then
+    echo "swarm mesh: no devices selected."
+    return 1
+  fi
+
+  local actual_count=${#devices[@]}
+  local swarm_id
+  swarm_id=$(_swarm_gen_id)
+  local swarm_dir="$(_swarm_state_dir)/$swarm_id"
+  [[ -z "$name" ]] && name="mesh-$swarm_id"
+
+  mkdir -p "$swarm_dir"/{agents,mailbox/shared,results}
+
+  local current_dir="${PWD}"
+  local -a pane_ids
+  local pane_map=""
+
+  # First device gets current pane (or new pane)
+  local main_pane="$TMUX_PANE"
+  tmux rename-window -t "$main_pane" "$name"
+
+  for ((i=0; i<${#devices[@]}; i++)); do
+    local device="${devices[$i]}"
+    local agent_id="agent-$((i+1))"
+    local pane_id
+
+    if (( i == 0 )); then
+      # First agent: use a new split pane (keep current pane for user)
+      pane_id=$(tmux split-window -h -t "$main_pane" -c "$current_dir" -P -F '#{pane_id}')
+    else
+      pane_id=$(tmux split-window -v -t "${pane_ids[-1]}" -c "$current_dir" -P -F '#{pane_id}')
+    fi
+
+    pane_ids+=("$pane_id")
+
+    # Launch agent on device
+    if _mesh_is_self "$device"; then
+      tmux send-keys -t "$pane_id" "$cmd" C-m
+    else
+      tmux send-keys -t "$pane_id" "tailscale ssh $device -t '$cmd'" C-m
+    fi
+
+    # Register agent
+    mkdir -p "$swarm_dir/mailbox/$agent_id"
+    cat > "$swarm_dir/agents/$agent_id.json" <<EOF
+{
+  "id": "$agent_id",
+  "pane_id": "$pane_id",
+  "role": "worker",
+  "command": "$cmd",
+  "device": "$device",
+  "remote_pane": null,
+  "status": "active",
+  "started": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
+    [[ -n "$pane_map" ]] && pane_map+=","
+    pane_map+="$pane_id:$agent_id"
+  done
+
+  tmux select-layout -t "$main_pane" tiled
+
+  # Write swarm metadata
+  local window_id session
+  window_id=$(tmux display-message -p '#{window_id}')
+  session=$(tmux display-message -p '#{session_name}')
+
+  cat > "$swarm_dir/swarm.json" <<EOF
+{
+  "id": "$swarm_id",
+  "name": "$name",
+  "topology": "mesh",
+  "hub": "local",
+  "status": "running",
+  "conductor": null,
+  "working_dir": "$current_dir",
+  "window_id": "$window_id",
+  "session": "$session",
+  "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "agents": [$(printf '"%s",' $(seq -f 'agent-%.0f' 1 ${#devices[@]}) | sed 's/,$//')]
+}
+EOF
+
+  tmux set-option -w @swarm_id "$swarm_id"
+  tmux set-option -w @swarm_panes "$pane_map"
+  tmux select-pane -t "$main_pane"
+
+  echo "swarm: created '$name' ($swarm_id) with $actual_count agent(s) across mesh"
+  for ((i=0; i<${#devices[@]}; i++)); do
+    echo "  agent-$((i+1)) → ${devices[$i]}"
+  done
+}
+
+# ------------------------------------------------------------------------------
+# FZF hub and pickers
+# ------------------------------------------------------------------------------
+
+# FZF swarm hub: browse all swarms with status preview
+_swarm_hub() {
+  local state_dir
+  state_dir=$(_swarm_state_dir)
+  [[ ! -d "$state_dir" ]] && { echo "No active swarms."; return; }
+
+  local src
+  src=$(_swarm_src)
+
+  # Build TSV list of swarms
+  local swarm_list=""
+  for swarm_file in "$state_dir"/*/swarm.json; do
+    [[ -f "$swarm_file" ]] || continue
+    local id name topology agent_count created topo_icon
+    id=$(jq -r '.id' "$swarm_file")
+    name=$(jq -r '.name' "$swarm_file")
+    topology=$(jq -r '.topology' "$swarm_file")
+    agent_count=$(jq -r '.agents | length' "$swarm_file")
+    created=$(jq -r '.created' "$swarm_file" | cut -c1-16)
+    topo_icon=$(_swarm_topo_icon "$topology")
+    swarm_list+="${id}\t${name}\t${topo_icon} ${topology}\t${agent_count} agents\t${created}\n"
+  done
+
+  [[ -z "$swarm_list" ]] && { echo "No active swarms."; return; }
+
+  local selected
+  selected=$(echo -e "$swarm_list" | \
+    fzf --tmux 80%,70% \
+      --header "enter: switch  ctrl-x: kill  ctrl-c: collect  ctrl-d: dashboard" \
+      --delimiter $'\t' \
+      --with-nth 2,3,4,5 \
+      --preview "source '$src' && _swarm_status_by_id {1}" \
+      --preview-window "right:55%" \
+      --bind "ctrl-x:execute-silent(source '$src' && _swarm_kill {1})+reload(source '$src' && _swarm_hub_list)" \
+      --bind "ctrl-c:execute(source '$src' && _swarm_collect_by_id {1})") || return 0
+
+  local swarm_id window_id session
+  swarm_id=$(echo "$selected" | cut -f1)
+  [[ -z "$swarm_id" ]] && return 0
+
+  local swarm_dir="$(_swarm_state_dir)/$swarm_id"
+  window_id=$(jq -r '.window_id' "$swarm_dir/swarm.json")
+  session=$(jq -r '.session' "$swarm_dir/swarm.json")
+
+  # Switch to the swarm's window
+  tmux select-window -t "$window_id" 2>/dev/null || \
+    echo "swarm: window no longer exists."
+}
+
+# Helper for hub reload (outputs TSV)
+_swarm_hub_list() {
+  local state_dir="$HOME/.local/share/omacmux/swarms"
+  for swarm_file in "$state_dir"/*/swarm.json; do
+    [[ -f "$swarm_file" ]] || continue
+    local id name topology agent_count created
+    id=$(jq -r '.id' "$swarm_file")
+    name=$(jq -r '.name' "$swarm_file")
+    topology=$(jq -r '.topology' "$swarm_file")
+    agent_count=$(jq -r '.agents | length' "$swarm_file")
+    created=$(jq -r '.created' "$swarm_file" | cut -c1-16)
+    local topo_icon
+    case "$topology" in star) topo_icon="★";; pipe) topo_icon="▸";; pair) topo_icon="⇄";; mesh) topo_icon="◆";; *) topo_icon="·";; esac
+    printf "%s\t%s\t%s %s\t%s agents\t%s\n" "$id" "$name" "$topo_icon" "$topology" "$agent_count" "$created"
+  done
+}
+
+# Collect results for a specific swarm ID (used by hub)
+_swarm_collect_by_id() {
+  local swarm_id="$1"
+  local swarm_dir="$HOME/.local/share/omacmux/swarms/$swarm_id"
+  [[ -d "$swarm_dir" ]] || return 1
+
+  local count=0
+  {
+    echo "# Swarm Results"
+    echo "Collected: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo ""
+    for agent_file in "$swarm_dir/agents/"*.json; do
+      [[ -f "$agent_file" ]] || continue
+      local agent_id role device pane_id
+      agent_id=$(jq -r '.id' "$agent_file")
+      role=$(jq -r '.role' "$agent_file")
+      device=$(jq -r '.device' "$agent_file")
+      pane_id=$(jq -r '.pane_id' "$agent_file")
+
+      echo "## $agent_id ($role, $device)"
+      echo '```'
+      if [[ "$device" == "local" ]]; then
+        tmux capture-pane -t "$pane_id" -p 2>/dev/null
+      else
+        tailscale ssh "$device" -- tmux capture-pane -t "$pane_id" -p 2>/dev/null
+      fi
+      echo '```'
+      echo ""
+      (( count++ ))
+    done
+  } > "$swarm_dir/summary.md"
+  echo "swarm: collected $count agent(s) → $swarm_dir/summary.md"
+}
+
+# FZF agent picker: browse agents with live pane capture preview
+_swarm_pick() {
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm pick: no active swarm."; return 1; }
+
+  local src
+  src=$(_swarm_src)
+
+  # Build TSV of agents
+  local agent_list=""
+  for agent_file in "$swarm_dir/agents/"*.json; do
+    [[ -f "$agent_file" ]] || continue
+    local agent_id role device pane_id
+    agent_id=$(jq -r '.id' "$agent_file")
+    role=$(jq -r '.role' "$agent_file")
+    device=$(jq -r '.device' "$agent_file")
+    pane_id=$(jq -r '.pane_id' "$agent_file")
+    agent_list+="${agent_id}\t${role}\t${device}\t${pane_id}\n"
+  done
+
+  [[ -z "$agent_list" ]] && { echo "No agents."; return; }
+
+  local selected
+  selected=$(echo -e "$agent_list" | sort -V | \
+    fzf --tmux 70%,60% \
+      --header "enter: focus  ctrl-r: read mailbox  ctrl-c: capture" \
+      --delimiter $'\t' \
+      --with-nth 1,2,3 \
+      --preview "
+        device=\$(echo {} | cut -f3)
+        pane=\$(echo {} | cut -f4)
+        if [[ \"\$device\" == 'local' ]]; then
+          tmux capture-pane -e -p -t \"\$pane\" 2>/dev/null || echo '(pane not available)'
+        else
+          tailscale ssh \"\$device\" -- tmux capture-pane -e -p -t \"\$pane\" 2>/dev/null || echo '(remote pane not available)'
+        fi
+      " \
+      --preview-window "right:60%" \
+      --bind "ctrl-r:execute(
+        source '$src'
+        agent=\$(echo {} | cut -f1)
+        _swarm_read \"\$agent\" | less
+      )" \
+      --bind "ctrl-c:execute-silent(
+        source '$src'
+        agent=\$(echo {} | cut -f1)
+        _swarm_capture \"\$agent\"
+      )") || return 0
+
+  local target_pane
+  target_pane=$(echo "$selected" | cut -f4)
+  [[ -n "$target_pane" ]] && tmux select-pane -t "$target_pane" 2>/dev/null
+}
+
+# ------------------------------------------------------------------------------
+# Live dashboard
+# ------------------------------------------------------------------------------
+
+# Live-refreshing dashboard showing all agents' output
+# Usage: swarm dashboard  (opens in popup)
+_swarm_dashboard() {
+  local swarm_id
+  swarm_id=$(_swarm_current_id)
+  [[ -z "$swarm_id" ]] && { echo "swarm dashboard: no active swarm."; return 1; }
+
+  local swarm_dir="$(_swarm_state_dir)/$swarm_id"
+  local src
+  src=$(_swarm_src)
+
+  # If not already in a popup, open one
+  if [[ -z "$TMUX_POPUP" ]]; then
+    tmux display-popup -E -w 85% -h 80% -T " swarm dashboard " \
+      "TMUX_POPUP=1 bash -ic 'source \"$src\" && _swarm_dashboard'"
+    return
+  fi
+
+  # Live refresh loop
+  local swarm_name topology topo_icon
+  swarm_name=$(jq -r '.name' "$swarm_dir/swarm.json")
+  topology=$(jq -r '.topology' "$swarm_dir/swarm.json")
+  topo_icon=$(_swarm_topo_icon "$topology")
+
+  while true; do
+    clear
+    _swarm_colors
+
+    printf "  ${_sw_bold}SWARM DASHBOARD${_sw_reset}: ${_sw_cyan}%s${_sw_reset}  ${_sw_orange}[%s %s]${_sw_reset}        ${_sw_dim}refreshed: %s${_sw_reset}\n" \
+      "$swarm_name" "$topo_icon" "$topology" "$(date +%H:%M:%S)"
+    echo "  ──────────────────────────────────────────────────────────────────"
+    echo ""
+
+    for agent_file in "$swarm_dir/agents/"*.json; do
+      [[ -f "$agent_file" ]] || continue
+      local agent_id role device pane_id indicator
+      agent_id=$(jq -r '.id' "$agent_file")
+      role=$(jq -r '.role' "$agent_file")
+      device=$(jq -r '.device' "$agent_file")
+      pane_id=$(jq -r '.pane_id' "$agent_file")
+
+      if _swarm_pane_alive "$agent_id"; then
+        indicator="${_sw_green}●${_sw_reset}"
+      else
+        indicator="${_sw_dim}○${_sw_reset}"
+      fi
+
+      local dev_tag=""
+      [[ "$device" != "local" ]] && dev_tag=", $device"
+
+      printf "  ${indicator} ${_sw_bold}${_sw_cyan}%s${_sw_reset} (%s%s)\n" "$agent_id" "$role" "$dev_tag"
+      echo "  ──────────────────────────────"
+
+      # Capture last 5 non-empty lines from the pane
+      local output
+      if [[ "$device" == "local" ]]; then
+        output=$(tmux capture-pane -t "$pane_id" -p 2>/dev/null | grep -v '^$' | tail -5)
+      else
+        output=$(tailscale ssh "$device" -- tmux capture-pane -t "$pane_id" -p 2>/dev/null | grep -v '^$' | tail -5)
+      fi
+
+      if [[ -n "$output" ]]; then
+        echo "$output" | while IFS= read -r line; do
+          printf "  %s\n" "$line"
+        done
+      else
+        printf "  ${_sw_dim}(no output)${_sw_reset}\n"
+      fi
+      echo ""
+    done
+
+    printf "  ${_sw_dim}[q] quit  [r] refresh  [c] collect results${_sw_reset}\n"
+
+    read -t 5 -n 1 key 2>/dev/null
+    case "$key" in
+      q) break ;;
+      c)
+        _swarm_collect_by_id "$swarm_id" >/dev/null 2>&1
+        echo "  Results collected."
+        sleep 1
+        ;;
+    esac
+  done
+}
+
+# ------------------------------------------------------------------------------
+# Status bar badge
+# ------------------------------------------------------------------------------
+
+# Output a short swarm badge for tmux status-right
+# Called via tmux #() shell command
+_swarm_badge() {
+  # Read swarm ID from the current window
+  local swarm_id
+  swarm_id=$(tmux show-option -wqv @swarm_id 2>/dev/null)
+  [[ -z "$swarm_id" ]] && return
+
+  local swarm_dir="$HOME/.local/share/omacmux/swarms/$swarm_id"
+  [[ -f "$swarm_dir/swarm.json" ]] || return
+
+  local name topology agent_count topo_icon
+  name=$(jq -r '.name' "$swarm_dir/swarm.json")
+  topology=$(jq -r '.topology' "$swarm_dir/swarm.json")
+  agent_count=$(jq -r '.agents | length' "$swarm_dir/swarm.json")
+
+  case "$topology" in
+    star) topo_icon="★" ;; pipe) topo_icon="▸" ;; pair) topo_icon="⇄" ;;
+    mesh) topo_icon="◆" ;; *) topo_icon="·" ;;
+  esac
+
+  printf "S:%s %s%s " "$name" "$topo_icon" "$agent_count"
+}
+
+# ------------------------------------------------------------------------------
+# Help
+# ------------------------------------------------------------------------------
+
+_swarm_help() {
+  cat <<'EOF'
+swarm — agent-to-agent interaction system
+
+LIFECYCLE
+  swarm start <N> <cmd> [--name X]   Create N local agents (flat topology)
+  swarm kill [id]                     Tear down a swarm
+  swarm ls                            List all active swarms
+
+TOPOLOGIES
+  swarm star <N> <cmd>     ★ 1 conductor + N-1 workers (autonomous delegation)
+  swarm pipe <N> <cmd>     ▸ N sequential stages (pipeline)
+  swarm pair <cmd>         ⇄ Coder + reviewer feedback loop
+  swarm mixed <N> <cmd> [<N> <cmd>] ...  Mixed commands (e.g. 1 bash 2 cx)
+  swarm mesh <N> <cmd>     ◆ Distributed across Tailscale devices
+
+COMMUNICATION
+  swarm send <agent> <msg>   Message a specific agent
+  swarm broadcast <msg>      Message all agents
+  swarm read [agent]         Read agent's mailbox
+
+OUTPUT & MONITORING
+  swarm inspect <agent>      Pane output + mailbox in one view
+  swarm capture <agent>      Capture agent's pane output only
+  swarm collect              Aggregate all outputs into summary.md
+  swarm status               Colored status with topology diagram
+  swarm topology             Show topology diagram only
+  swarm dashboard            Live-refreshing agent output popup
+  swarm hub                  FZF swarm browser with previews
+  swarm pick                 FZF agent browser with live pane preview
+
+EXAMPLES
+  swarm star 4 cx                    conductor + 3 workers
+  swarm pipe 3 cx                    generate → refine → test
+  swarm pair cx                      write + review loop
+  swarm mesh 3 cx                    pick 3 devices, one agent each
+  swarm send agent-2 "implement auth module"
+  swarm dashboard                    watch all agents live
+  swarm collect                      aggregate all outputs
+EOF
+}
+
+# ------------------------------------------------------------------------------
+# Dispatcher
+# ------------------------------------------------------------------------------
+
+swarm() {
+  local subcmd="${1:-help}"
+  shift 2>/dev/null
+
+  case "$subcmd" in
+    start)              _swarm_start "$@" ;;
+    star)               _swarm_star "$@" ;;
+    pipe)               _swarm_pipe "$@" ;;
+    pair)               _swarm_pair "$@" ;;
+    mixed|mix)          _swarm_mixed "$@" ;;
+    mesh)               _swarm_mesh "$@" ;;
+    send)               _swarm_send "$@" ;;
+    broadcast|bc)       _swarm_broadcast "$@" ;;
+    read)               _swarm_read "$@" ;;
+    capture)            _swarm_capture "$@" ;;
+    inspect)            _swarm_inspect "$@" ;;
+    collect)            _swarm_collect "$@" ;;
+    status|st)          _swarm_status "$@" ;;
+    ls|list)            _swarm_ls "$@" ;;
+    kill)               _swarm_kill "$@" ;;
+    hub)                _swarm_hub "$@" ;;
+    pick)               _swarm_pick "$@" ;;
+    dashboard|dash)     _swarm_dashboard "$@" ;;
+    topology|topo)      _swarm_topology ;;
+    badge)              _swarm_badge ;;
+    dir)                _swarm_dir ;;
+    whoami)             _swarm_whoami ;;
+    help|--help|-h)     _swarm_help ;;
+    *)
+      echo "swarm: unknown command '$subcmd'"
+      _swarm_help
+      return 1
+      ;;
+  esac
+}
