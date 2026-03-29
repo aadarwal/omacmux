@@ -1,11 +1,17 @@
 # omacmux
 
-**The [omarchy](https://github.com/basecamp/omarchy) developer experience, rebuilt for macOS.**
-
-One command to go from a fresh Mac to a fully configured terminal dev environment — tmux layouts, LazyVim, Ghostty, starship prompt, git config, and shell ergonomics. Everything symlinked, everything version-controlled, everything yours.
+An agent-first IDE built entirely in the terminal.
 
 > *"It never gets old that your operating system is this malleable."*
 > — DHH
+
+---
+
+tmux is the window manager. Neovim is the editor. AI agents are first-class panes — not plugins bolted on, but peers sitting next to your code with their own space to think. You compose layouts that give you and your agents exactly the arrangement you need, then tear them down and reshape them when the work changes.
+
+This is a research environment. The kind of setup where you spawn four Claude instances across four git worktrees and let them all run in parallel. Where you open a swarm of agents tiled across your screen and watch them collaborate. Where your dev layout is nvim on the left, an AI agent on the right, and a terminal at the bottom — and that's just the default.
+
+Everything is a shell function. Everything is composable. Everything is yours to change.
 
 ---
 
@@ -23,97 +29,28 @@ t              # start tmux
 tdl cx         # dev layout: nvim + claude + terminal
 ```
 
-That's it. You're in.
-
 ---
 
-## What You Get
+## The Stack
 
-| Layer | What's configured |
-|-------|-------------------|
-| **Terminal** | [Ghostty](https://ghostty.org) with `macos-option-as-alt`, JetBrainsMono Nerd Font, hidden titlebar |
-| **Multiplexer** | tmux with vi-copy, mouse support, git-branch-per-tab status bar, popup pickers, nested tmux toggle |
-| **Editor** | [LazyVim](https://www.lazyvim.org) with 46 plugins, tokyonight-night, transparent backgrounds, telescope worktree picker |
-| **Prompt** | [Starship](https://starship.rs) with git branch/status, worktree detection |
-| **Shell** | Bash 5 with [eza](https://eza.rocks), [fzf](https://junegunn.github.io/fzf/), [zoxide](https://github.com/ajeetdsouza/zoxide), [bat](https://github.com/sharkdp/bat), [mise](https://mise.jdx.dev), history search, tab-completion cycling |
-| **Git** | Rebase-on-pull, histogram diffs, rerere, GitHub CLI credential helper, worktree aliases |
-| **Theme** | Matte-black palette across all surfaces with bundled wallpapers |
-
----
-
-## Session Management
-
-| Command | Description |
-|---------|-------------|
-| `t` | Attach last session / create "Work" (outside tmux) or fzf session picker (inside tmux) |
-| `t <name>` | Attach or create a named session |
-| `t <name> <dir>` | Create named session rooted at directory |
-| `t .` | Session named after current git repo |
-| `tn <name> [dir]` | Create new named session (errors if exists) |
-| `tp` | fzf session picker with live preview and inline kill (`ctrl-x`) |
-| `tj [query]` | Jump to project directory (zoxide + fzf), create/attach session |
-| `tk [name]` | Kill session (current if no arg) |
-| `tl` | List all sessions |
-
-```bash
-t                  # attach to last session or create "Work"
-t myapp            # attach to "myapp" or create it
-t myapp ~/code/app # create "myapp" rooted at ~/code/app
-t .                # session named after git repo root
-tj                 # fzf pick from all known project directories
-tk myapp           # kill "myapp" session
-```
-
-### Workspace Configs
-
-Drop a `.tmux-workspace` file in any project directory. When `t` creates a session there, it sources the file automatically.
-
-```bash
-# .tmux-workspace — example for a Rails project
-tdl cx
-tw server "rails server"
-tw logs "tail -f log/development.log"
-tmux select-window -t :1
-```
-
-### Persistence
-
-```bash
-tss              # save tmux state as "default"
-tss work-friday  # save as "work-friday"
-tsr              # restore "default"
-tsr work-friday  # restore "work-friday"
-```
-
-Saves are stored in `~/.local/share/omacmux/sessions/`. Restores the directory skeleton (sessions, windows, panes with correct working directories) but not running processes.
-
----
-
-## Window Management
-
-| Command | Description |
-|---------|-------------|
-| `tw <name> [cmd] [dir]` | Create named window, optionally run a command |
-| `twp` | fzf window picker with live preview |
-| `to [cmd]` | Popup overlay / scratchpad |
-
-```bash
-tw server "rails server"     # window named "server" running rails
-tw logs "tail -f log/dev.log"
-twp                          # pick a window with fzf
-to                           # popup scratchpad shell
-to htop                      # popup running htop
-```
+| Layer | Tool |
+|-------|------|
+| Terminal | [Ghostty](https://ghostty.org) |
+| Multiplexer | tmux |
+| Editor | [Neovim](https://neovim.io) + [LazyVim](https://www.lazyvim.org) |
+| Prompt | [Starship](https://starship.rs) |
+| Shell | Bash 5 + [eza](https://eza.rocks) + [fzf](https://junegunn.github.io/fzf/) + [zoxide](https://github.com/ajeetdsouza/zoxide) + [bat](https://github.com/sharkdp/bat) + [mise](https://mise.jdx.dev) |
+| AI | [Claude Code](https://claude.ai/code), [opencode](https://github.com/sst/opencode), or anything that runs in a terminal |
 
 ---
 
 ## Layouts
 
-All layout commands run inside tmux.
+All layout commands run inside tmux. This is the core of omacmux — arranging agents and editors in space.
 
 ### `tdl` — Dev Layout
 
-The daily driver. Editor on the left, AI on the right, terminal at the bottom.
+The daily driver. Editor left, agent right, terminal bottom.
 
 ```
 ┌──────────────────────┬─────────────┐
@@ -127,18 +64,7 @@ The daily driver. Editor on the left, AI on the right, terminal at the bottom.
 
 ```bash
 tdl cx         # nvim + claude + terminal
-tdl cx c       # nvim + claude + opencode (stacked) + terminal
-```
-
-Proportions configurable via `TDL_AI_WIDTH` (default 30) and `TDL_TERMINAL_HEIGHT` (default 15).
-
-### `tdlm` — Multi-Project Dev Layout
-
-One `tdl` window per subdirectory. Built for monorepos.
-
-```bash
-cd ~/projects/my-monorepo && t
-tdlm cx    # one window per subdirectory, each with nvim + claude + terminal
+tdl cx c       # nvim + claude + opencode (stacked)
 ```
 
 ### `tsl` — Swarm Layout
@@ -146,51 +72,13 @@ tdlm cx    # one window per subdirectory, each with nvim + claude + terminal
 N tiled panes all running the same command. Parallel AI at scale.
 
 ```bash
-tsl 4 cx   # 4 tiled panes, each running claude
-tsl 4 cxx  # 4 tiled panes, full permissions skip
+tsl 4 cx       # 4 claude instances, tiled
+tsl 4 cxx      # same, full permissions skip
 ```
-
-### `tpl` — Pair Layout
-
-Two editors side by side with a shared terminal.
-
-```
-┌───────────────────┬───────────────────┐
-│                   │                   │
-│   nvim (50%)      │   nvim (50%)      │
-│                   │                   │
-├───────────────────┴───────────────────┤
-│           terminal (15%)              │
-└───────────────────────────────────────┘
-```
-
-### `tml` — Monitor Layout
-
-Main pane on the left, stacked command panes on the right.
-
-```bash
-tml "tail -f log/dev.log" "docker stats" "htop"
-```
-
-```
-┌───────────────────────┬──────────────┐
-│                       │ tail -f ...  │
-│    main terminal      ├──────────────┤
-│       (70%)           │ docker stats │
-│                       ├──────────────┤
-│                       │    htop      │
-└───────────────────────┴──────────────┘
-```
-
----
-
-## Git Worktree Layouts
-
-Worktree-aware layouts for running AI agents across multiple branches simultaneously.
 
 ### `twdl` — Worktree Dev Layout
 
-Editor on the left, one AI agent per worktree stacked on the right, terminal at the bottom.
+One agent per git worktree, stacked on the right. Editor on the left browses all of them.
 
 ```
 ┌──────────────────────┬─────────────────────┐
@@ -207,79 +95,110 @@ twdl cx              # auto-detect all worktrees
 twdl cx master feat  # specific branches only
 ```
 
-### `twsl` — Worktree Swarm Layout
+### `twsl` — Worktree Swarm
 
-Full-width vertical stack, one AI per worktree. Maximum agent visibility.
-
-```
-┌────────────────────────────────────────────┐
-│  cx @ master                               │
-├────────────────────────────────────────────┤
-│  cx @ feat/auth                            │
-├────────────────────────────────────────────┤
-│  cx @ fix/bug                              │
-└────────────────────────────────────────────┘
-```
+Full-width vertical stack, one AI per worktree.
 
 ```bash
 twsl cxx             # full-width swarm across all worktrees
-twsl cx master feat  # specific branches only
 ```
 
-### `twl` / `twlm` — Worktree Tabs
+### More Layouts
+
+| Command | What it does |
+|---------|--------------|
+| `tdlm <ai>` | One `tdl` per subdirectory — built for monorepos |
+| `tpl` | Two editors side by side + terminal |
+| `tml <cmds...>` | Main pane left, stacked command panes right |
+| `twl <branch> <ai>` | New tab with `tdl` in a specific worktree |
+| `twlm <ai>` | One tab per worktree, each with full `tdl` |
+
+---
+
+## Sessions
+
+| Command | Description |
+|---------|-------------|
+| `t` | Attach last session / create "Work", or fzf picker inside tmux |
+| `t <name>` | Attach or create named session |
+| `t <name> <dir>` | Named session rooted at directory |
+| `t .` | Session named after current git repo |
+| `tj [query]` | Jump to project dir (zoxide + fzf), create/attach session |
+| `tp` | fzf session picker with preview and inline kill (`ctrl-x`) |
+| `tk [name]` | Kill session |
+| `tl` | List sessions |
+
+### Workspace Configs
+
+Drop a `.tmux-workspace` file in any project directory. When `t` creates a session there, it sources the file automatically.
 
 ```bash
-twl feat/auth cx    # new tab with full dev layout in feat/auth worktree
-twlm cx             # one tab per worktree, each with nvim + claude + terminal
+# .tmux-workspace
+tdl cx
+tw server "rails server"
+tw logs "tail -f log/development.log"
+tmux select-window -t :1
 ```
 
-### Worktree Management
+### Persistence
+
+```bash
+tss              # save tmux state
+tsr              # restore it
+```
+
+---
+
+## Windows
+
+| Command | Description |
+|---------|-------------|
+| `tw <name> [cmd]` | Create named window, optionally run a command |
+| `twp` | fzf window picker |
+| `to [cmd]` | Popup overlay / scratchpad |
+
+---
+
+## Worktrees
 
 | Command | Description |
 |---------|-------------|
 | `gwa <branch> [base]` | Create worktree as sibling directory |
 | `gwr [branch]` | Remove worktree (fzf picker if no arg) |
-| `gwl` | List all worktrees |
-| `gws [branch]` | cd into a worktree (fzf picker if no arg) |
+| `gwl` | List worktrees |
+| `gws [branch]` | cd into worktree (fzf picker if no arg) |
 | `twf [path]` | Refocus all AI panes to a specific worktree |
 
-Worktrees are created as sibling directories: `~/myapp` becomes `~/myapp-feat-auth`.
-
-In nvim, press `<leader>gw` to open a telescope worktree picker that switches nvim's cwd and auto-focuses the corresponding agent pane.
+In nvim, `<leader>gw` opens a telescope worktree picker that switches cwd and auto-focuses the corresponding agent pane.
 
 ---
 
 ## Keybindings
 
-### No prefix needed
+### No prefix
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+Option+Arrows` | Navigate between panes |
+| `Ctrl+Option+Arrows` | Navigate panes |
 | `Ctrl+Option+Shift+Arrows` | Resize panes |
-| `Option+1-9` | Switch to window 1-9 |
-| `Option+Left/Right` | Previous/next window |
-| `Option+Up/Down` | Previous/next session |
+| `Option+1-9` | Switch to window |
+| `Option+Left/Right` | Prev/next window |
+| `Option+Up/Down` | Prev/next session |
 | `F12` | Toggle nested tmux pass-through |
 
 ### With prefix (`Ctrl+B`)
 
 | Key | Action |
 |-----|--------|
-| `h` | Split below |
-| `v` | Split right |
+| `h` / `v` | Split below / right |
 | `x` | Kill pane |
 | `c` / `k` / `r` | New / kill / rename window |
 | `C` / `K` / `R` | New / kill / rename session |
 | `d` | Detach |
-| `q` | Reload tmux config |
-| `s` | Session picker (fzf popup) |
-| `w` | Window picker (fzf popup) |
-| `j` | Project jump (fzf popup) |
+| `q` | Reload config |
+| `s` / `w` / `j` | Session / window / project picker (fzf) |
 | `` ` `` | Scratchpad popup |
-| `g` | Git log graph (popup) |
-| `G` | Worktree switcher (fzf popup) |
-| `b` | Branch switcher (fzf popup) |
+| `g` / `G` / `b` | Git log / worktree / branch picker |
 
 ---
 
@@ -298,29 +217,24 @@ In nvim, press `<leader>gw` to open a telescope worktree picker that switches nv
 
 ---
 
-## Upgrade / Uninstall
+## Install / Upgrade / Uninstall
 
 ```bash
-cd ~/omacmux && ./upgrade.sh     # pull latest, install new deps, link new configs
-cd ~/omacmux && ./uninstall.sh   # remove all symlinks, restore backups
+./install.sh     # brew deps, symlinks, git identity, shell setup
+./upgrade.sh     # pull latest, install new deps, link new configs
+./uninstall.sh   # remove symlinks, restore backups
 ```
-
-Homebrew packages are left in place — the uninstaller prints a cleanup command if you want to remove them.
 
 ---
 
 ## Notes
 
-- **Bash version** — macOS ships bash 3.2. The `tsl` command requires bash 4.3+. The installer offers to set Homebrew bash as your default shell.
-- **Mission Control conflicts** — `Ctrl+Option+Shift+Arrows` may conflict with Mission Control. Disable in **System Settings > Keyboard > Keyboard Shortcuts > Mission Control**.
-- **First nvim launch** — neovim auto-installs all 46 plugins via lazy.nvim on first run (~30-60s). Subsequent launches are instant.
+- **Bash 4.3+** required for `tsl`. The installer offers to set Homebrew bash as default.
+- **Mission Control** — `Ctrl+Option+Shift+Arrows` may conflict. Disable in System Settings > Keyboard > Keyboard Shortcuts > Mission Control.
+- **First nvim launch** auto-installs 46 plugins via lazy.nvim (~30-60s).
 
 ---
 
 ## Credits
 
-Inspired by [omarchy](https://github.com/basecamp/omarchy) by [DHH](https://github.com/dhh) and the Basecamp team.
-
-## License
-
-MIT
+The DHH quote is from his work on [omakub](https://omakub.org) / [omarchy](https://github.com/basecamp/omarchy), which inspired the original direction. omacmux has since diverged into something different — an agent-first research environment rather than a general-purpose dev setup.
