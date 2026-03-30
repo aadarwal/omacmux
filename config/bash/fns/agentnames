@@ -1,0 +1,208 @@
+# ==============================================================================
+# Agent Names: Voice-friendly agent references via NATO phonetic alphabet
+# ==============================================================================
+#
+# Provides NATO alphabet mapping and custom nicknames so agents can be
+# referenced by spoken name instead of "agent-N" IDs.
+#
+# Usage:
+#   who                          # list agents with names and status
+#   name agent-1 scout           # nickname agent-1 as "scout"
+#   tell alpha "do X"            # send message to agent-1 via NATO name
+#   _an_resolve bravo            # -> agent-2
+#   _an_display_name agent-3     # -> Charlie
+
+# Stub guards — loaded before `voice` alphabetically
+command -v _voice_say &>/dev/null || _voice_say() { :; }
+command -v _voice_enabled &>/dev/null || _voice_enabled() { return 1; }
+
+# ------------------------------------------------------------------------------
+# NATO alphabet and state
+# ------------------------------------------------------------------------------
+
+declare -a _AN_NATO=(alpha bravo charlie delta echo foxtrot golf hotel india juliet)
+
+_an_state_dir="$HOME/.local/share/omacmux/agentnames"
+
+# ANSI colors
+_an_green='\033[32m'
+_an_dim='\033[2m'
+_an_bold='\033[1m'
+_an_cyan='\033[36m'
+_an_reset='\033[0m'
+
+# ------------------------------------------------------------------------------
+# Core resolution functions
+# ------------------------------------------------------------------------------
+
+# Resolve a spoken name, number, or NATO word to agent-N format
+_an_resolve() {
+  local input="${1,,}"  # lowercase
+
+  # Already agent-N format
+  if [[ "$input" =~ ^agent-[0-9]+$ ]]; then
+    echo "$input"
+    return
+  fi
+
+  # Numeric only -> agent-N
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    echo "agent-$input"
+    return
+  fi
+
+  # NATO name -> find index
+  local i
+  for i in "${!_AN_NATO[@]}"; do
+    if [[ "${_AN_NATO[$i]}" == "$input" ]]; then
+      echo "agent-$(( i + 1 ))"
+      return
+    fi
+  done
+
+  # Custom nickname -> search state dir for matching .name files
+  local swarm_id
+  swarm_id=$(_swarm_current_id 2>/dev/null)
+  if [[ -n "$swarm_id" && -d "$_an_state_dir/$swarm_id" ]]; then
+    local f
+    for f in "$_an_state_dir/$swarm_id/"*.name; do
+      [[ -f "$f" ]] || continue
+      local stored
+      stored=$(<"$f")
+      if [[ "${stored,,}" == "$input" ]]; then
+        local base
+        base=$(basename "$f" .name)
+        echo "$base"
+        return
+      fi
+    done
+  fi
+
+  # No match — return as-is
+  echo "$input"
+}
+
+# Get display name for an agent ID
+_an_display_name() {
+  local agent_id="$1"
+
+  # Check for custom nickname
+  local swarm_id
+  swarm_id=$(_swarm_current_id 2>/dev/null)
+  if [[ -n "$swarm_id" && -f "$_an_state_dir/$swarm_id/$agent_id.name" ]]; then
+    echo "$(<"$_an_state_dir/$swarm_id/$agent_id.name")"
+    return
+  fi
+
+  # Fall back to NATO name
+  if [[ "$agent_id" =~ ^agent-([0-9]+)$ ]]; then
+    local num="${BASH_REMATCH[1]}"
+    local idx=$(( num - 1 ))
+    if (( idx >= 0 && idx < ${#_AN_NATO[@]} )); then
+      local nato="${_AN_NATO[$idx]}"
+      echo "${nato^}"
+      return
+    fi
+  fi
+
+  # Fall back to raw ID
+  echo "$agent_id"
+}
+
+# ------------------------------------------------------------------------------
+# User-facing commands
+# ------------------------------------------------------------------------------
+
+# Set a custom nickname for an agent
+name() {
+  local ref="$1"
+  local nickname="$2"
+
+  if [[ -z "$ref" || -z "$nickname" ]]; then
+    echo "Usage: name <agent-ref> <nickname>"
+    return 1
+  fi
+
+  local agent_id
+  agent_id=$(_an_resolve "$ref")
+
+  local swarm_id
+  swarm_id=$(_swarm_current_id 2>/dev/null)
+  if [[ -z "$swarm_id" ]]; then
+    echo "name: no active swarm in this window."
+    return 1
+  fi
+
+  mkdir -p "$_an_state_dir/$swarm_id"
+  echo "$nickname" > "$_an_state_dir/$swarm_id/$agent_id.name"
+
+  # Extract number for voice
+  local num="${agent_id#agent-}"
+  _voice_say "Agent $num is now $nickname"
+  printf "${_an_green}%s${_an_reset} is now ${_an_bold}%s${_an_reset}\n" "$agent_id" "$nickname"
+}
+
+# List all agents with names and activity status
+who() {
+  local swarm_id
+  swarm_id=$(_swarm_current_id 2>/dev/null)
+  if [[ -z "$swarm_id" ]]; then
+    echo "No active swarm"
+    return 0
+  fi
+
+  local swarm_dir
+  swarm_dir="$(_swarm_state_dir)/$swarm_id"
+  if [[ ! -d "$swarm_dir/agents" ]]; then
+    echo "No active swarm"
+    return 0
+  fi
+
+  local total=0 active=0
+
+  local agent_id
+  for agent_id in $(_swarm_agent_ids "$swarm_dir"); do
+    (( total++ ))
+    local display
+    display=$(_an_display_name "$agent_id")
+
+    local pane_id status_label cmd
+    pane_id=$(jq -r '.pane_id' "$swarm_dir/agents/$agent_id.json" 2>/dev/null)
+
+    cmd=$(tmux display-message -p -t "$pane_id" '#{pane_current_command}' 2>/dev/null)
+    if [[ -n "$cmd" ]]; then
+      status_label="${_an_green}active${_an_reset} ($cmd)"
+      (( active++ ))
+    else
+      status_label="${_an_dim}inactive${_an_reset}"
+    fi
+
+    printf "${_an_cyan}%s${_an_reset} (%s) — %b\n" "$display" "$agent_id" "$status_label"
+  done
+
+  if _voice_enabled; then
+    local inactive=$(( total - active ))
+    local summary="$total agents: $active active, $inactive inactive"
+    _voice_say "$summary"
+  fi
+}
+
+# Send a message to a named agent
+tell() {
+  if [[ $# -lt 2 ]]; then
+    echo "Usage: tell <name> <message...>"
+    return 1
+  fi
+
+  local agent_id
+  agent_id=$(_an_resolve "$1")
+  shift
+
+  local display
+  display=$(_an_display_name "$agent_id")
+  local msg="$*"
+
+  swarm send "$agent_id" "$msg"
+  _voice_say "Told $display: $msg"
+  printf "Sent to ${_an_bold}%s${_an_reset}: %s\n" "$display" "$msg"
+}
