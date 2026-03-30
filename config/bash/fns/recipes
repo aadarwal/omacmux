@@ -1,0 +1,229 @@
+# ==============================================================================
+# Recipes: Pre-built swarm configurations launched by voice-friendly names
+# ==============================================================================
+#
+# Quick-launch common swarm topologies by name. Includes built-in recipes
+# and supports user-defined recipes saved to disk.
+#
+# Usage:
+#   recipe list            List available recipes
+#   recipe save <name>     Save current swarm as a recipe
+#   recipe edit <name>     Edit a user recipe
+#   recipe delete <name>   Delete a user recipe
+#   recipe <name> [args]   Run a recipe
+
+# Stub guards for voice helpers
+command -v _voice_say &>/dev/null || _voice_say() { :; }
+command -v _voice_sound &>/dev/null || _voice_sound() { :; }
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+_recipe_dir="$HOME/.local/share/omacmux/recipes"
+
+# ------------------------------------------------------------------------------
+# Built-in recipes
+# ------------------------------------------------------------------------------
+
+_recipe_builtin_research() {
+  local topic="${*:-general research}"
+  _voice_say "Starting research on $topic"
+  swarm star 4 cxx
+  sleep 2
+  swarm send agent-1 "Research the following topic thoroughly: $topic"
+}
+
+_recipe_builtin_build() {
+  local feature="${*:-feature}"
+  _voice_say "Starting build for $feature"
+  swarm wt 3 cxx
+  sleep 2
+  swarm broadcast "Build the following feature: $feature"
+}
+
+_recipe_builtin_fix() {
+  local issue="${*:-bug}"
+  _voice_say "Starting fix for $issue"
+  swarm pair cxx
+  sleep 2
+  swarm send agent-1 "Debug and fix: $issue"
+}
+
+_recipe_builtin_review() {
+  _voice_say "Opening review dashboard"
+  if command -v reviewd &>/dev/null; then
+    reviewd
+  elif command -v review &>/dev/null; then
+    review
+  else
+    echo "Review command not available"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Core functions
+# ------------------------------------------------------------------------------
+
+_recipe_run() {
+  local name="$1"; shift
+
+  # Check for built-in
+  if declare -f "_recipe_builtin_$name" &>/dev/null; then
+    _voice_say "Running recipe $name"
+    _voice_sound start
+    "_recipe_builtin_$name" "$@"
+    return
+  fi
+
+  # Check for user recipe
+  local recipe_file="$_recipe_dir/$name.sh"
+  if [[ -f "$recipe_file" ]]; then
+    _voice_say "Running recipe $name"
+    _voice_sound start
+    (
+      source "$recipe_file"
+      recipe_main "$@"
+    )
+    return
+  fi
+
+  echo -e "\033[31mUnknown recipe: $name\033[0m"
+  return 1
+}
+
+_recipe_list() {
+  echo -e "\033[1mBuilt-in recipes:\033[0m"
+  echo -e "  \033[36mresearch\033[0m  Star topology, 4 agents — deep-dive a topic"
+  echo -e "  \033[36mbuild\033[0m     Worktree topology, 3 agents — build a feature"
+  echo -e "  \033[36mfix\033[0m       Pair topology — debug and fix an issue"
+  echo -e "  \033[36mreview\033[0m    Launch review dashboard"
+
+  echo ""
+  echo -e "\033[1mUser recipes:\033[0m"
+  if [[ -d "$_recipe_dir" ]] && compgen -G "$_recipe_dir/*.sh" &>/dev/null; then
+    for f in "$_recipe_dir"/*.sh; do
+      local rname desc
+      rname=$(basename "$f" .sh)
+      desc=$(sed -n 's/^# Description: *//p' "$f" | head -1)
+      echo -e "  \033[36m$rname\033[0m  ${desc:-(no description)}"
+    done
+  else
+    echo "  (none)"
+  fi
+
+  # fzf picker if in tmux
+  if [[ -n "${TMUX:-}" ]] && command -v fzf &>/dev/null; then
+    echo ""
+    local items="research\tStar 4 agents — deep-dive a topic
+build\tWorktree 3 agents — build a feature
+fix\tPair — debug and fix an issue
+review\tLaunch review dashboard"
+
+    if [[ -d "$_recipe_dir" ]] && compgen -G "$_recipe_dir/*.sh" &>/dev/null; then
+      for f in "$_recipe_dir"/*.sh; do
+        local rname desc
+        rname=$(basename "$f" .sh)
+        desc=$(sed -n 's/^# Description: *//p' "$f" | head -1)
+        items+=$'\n'"$rname\t${desc:-(no description)}"
+      done
+    fi
+
+    local picked
+    picked=$(echo -e "$items" | fzf --tmux 50%,40% \
+      --header "Pick a recipe (enter to run)" \
+      --delimiter $'\t' \
+      --with-nth 1,2 \
+      --no-preview | cut -f1)
+    [[ -n "$picked" ]] && recipe "$picked"
+  fi
+  return 0
+}
+
+_recipe_save() {
+  local name="${1:?Usage: recipe save <name>}"
+
+  mkdir -p "$_recipe_dir"
+
+  # Find active swarm
+  local swarm_id
+  swarm_id=$(tmux show-option -wqv @swarm_id 2>/dev/null)
+  if [[ -z "$swarm_id" ]]; then
+    echo -e "\033[31mNo active swarm in this window.\033[0m"
+    return 1
+  fi
+
+  local swarm_dir="$HOME/.local/share/omacmux/swarms/$swarm_id"
+  local swarm_file="$swarm_dir/swarm.json"
+  if [[ ! -f "$swarm_file" ]]; then
+    echo -e "\033[31mSwarm state not found: $swarm_file\033[0m"
+    return 1
+  fi
+
+  local topology agent_count cmd_alias
+  topology=$(jq -r '.topology' "$swarm_file")
+  agent_count=$(jq -r '.agents | length' "$swarm_file")
+
+  # Try to detect agent command from first agent file
+  cmd_alias="cxx"
+  local first_agent="$swarm_dir/agents/agent-1.json"
+  if [[ -f "$first_agent" ]]; then
+    local agent_cmd
+    agent_cmd=$(jq -r '.command // empty' "$first_agent")
+    [[ -n "$agent_cmd" ]] && cmd_alias="$agent_cmd"
+  fi
+
+  cat > "$_recipe_dir/$name.sh" <<EOF
+#!/usr/bin/env bash
+# Recipe: $name
+# Description: $topology topology, $agent_count agents
+# Created: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+recipe_main() {
+  swarm $topology $agent_count $cmd_alias
+}
+EOF
+
+  echo -e "\033[32mSaved recipe $name\033[0m to $_recipe_dir/$name.sh"
+  _voice_say "Saved recipe $name"
+}
+
+_recipe_edit() {
+  local name="${1:?Usage: recipe edit <name>}"
+  local recipe_file="$_recipe_dir/$name.sh"
+  if [[ ! -f "$recipe_file" ]]; then
+    echo -e "\033[31mRecipe not found: $name\033[0m"
+    return 1
+  fi
+  ${EDITOR:-nvim} "$recipe_file"
+}
+
+_recipe_delete() {
+  local name="${1:?Usage: recipe delete <name>}"
+  local recipe_file="$_recipe_dir/$name.sh"
+  if [[ ! -f "$recipe_file" ]]; then
+    echo -e "\033[31mRecipe not found: $name\033[0m"
+    return 1
+  fi
+
+  read -rp "Delete recipe $name? [y/N] " confirm
+  [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled."; return 0; }
+
+  rm "$recipe_file"
+  echo -e "\033[32mDeleted recipe $name\033[0m"
+  _voice_say "Deleted recipe $name"
+}
+
+# ------------------------------------------------------------------------------
+# Main dispatch
+# ------------------------------------------------------------------------------
+
+recipe() {
+  case "${1:-}" in
+    list|ls)   _recipe_list ;;
+    save)      shift; _recipe_save "$@" ;;
+    edit)      shift; _recipe_edit "$@" ;;
+    delete|rm) shift; _recipe_delete "$@" ;;
+    "")        _recipe_list ;;
+    *)         _recipe_run "$@" ;;
+  esac
+}
