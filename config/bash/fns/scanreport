@@ -1,0 +1,221 @@
+# ==============================================================================
+# Scan Report Viewer: fzf-powered browser for codebase scan results
+# ==============================================================================
+#
+# Usage:
+#   scanreport              # browse all scans with fzf
+#   scanreport list|ls      # list all past scans as a table
+#   scanreport latest       # show the most recent scan report
+#   scanreport <scan_id>    # show a specific scan report
+
+SCAN_DIR="${SCAN_DIR:-$HOME/.local/share/omacmux/scans}"
+command -v _voice_say &>/dev/null || _voice_say() { :; }
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+# Display markdown: bat if available, else cat
+_scanreport_render_md() {
+  local file="$1"
+  if command -v bat &>/dev/null; then
+    bat --language=md --style=plain --color=always "$file"
+  else
+    cat "$file"
+  fi
+}
+
+# Find best report file in a scan directory
+_scanreport_best_report() {
+  local scan_dir="$1"
+  if [[ -f "$scan_dir/report.md" ]]; then
+    echo "$scan_dir/report.md"
+  elif [[ -f "$scan_dir/raw_results.md" ]]; then
+    echo "$scan_dir/raw_results.md"
+  fi
+}
+
+# Collect scan entries as tab-separated lines: scan_dir \t scan_id \t repo \t mode \t date \t status
+_scanreport_entries() {
+  local found=0
+  for scan_json in "$SCAN_DIR"/*/*/scan.json; do
+    [[ -f "$scan_json" ]] || continue
+    found=1
+    local scan_dir
+    scan_dir=$(dirname "$scan_json")
+    local fields
+    fields=$(jq -r '[
+      (.id // "unknown"),
+      ((.repo // "unknown") | split("/") | last),
+      (.mode // "unknown"),
+      (.started // "unknown"),
+      (.status // "unknown")
+    ] | join("\t")' "$scan_json" 2>/dev/null) || continue
+    printf '%s\t%s\n' "$scan_dir" "$fields"
+  done
+  (( found == 0 )) && return 1
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# List all past scans
+# ------------------------------------------------------------------------------
+
+_scanreport_list() {
+  local entries
+  entries=$(_scanreport_entries)
+  if [[ -z "$entries" ]]; then
+    echo "No scans found in $SCAN_DIR"
+    return 0
+  fi
+
+  {
+    printf 'SCAN_ID\tREPO\tMODE\tDATE\tSTATUS\n'
+    while IFS=$'\t' read -r _ scan_id repo mode started status; do
+      printf '%s\t%s\t%s\t%s\t%s\n' "$scan_id" "$repo" "$mode" "$started" "$status"
+    done <<< "$entries"
+  } | column -t -s $'\t'
+}
+
+# ------------------------------------------------------------------------------
+# Show most recent scan report
+# ------------------------------------------------------------------------------
+
+_scanreport_latest() {
+  local latest_json
+  latest_json=$(find "$SCAN_DIR" -name 'scan.json' -type f -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -1)
+
+  if [[ -z "$latest_json" ]]; then
+    echo "No scans found in $SCAN_DIR"
+    return 0
+  fi
+
+  local scan_dir
+  scan_dir=$(dirname "$latest_json")
+  local report
+  report=$(_scanreport_best_report "$scan_dir")
+
+  if [[ -n "$report" ]]; then
+    _scanreport_render_md "$report"
+  else
+    echo "No report generated. Run 'scan collect' first."
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# fzf browser with drill-down
+# ------------------------------------------------------------------------------
+
+_scanreport_browse() {
+  local entries
+  entries=$(_scanreport_entries)
+  if [[ -z "$entries" ]]; then
+    echo "No scans found in $SCAN_DIR"
+    return 0
+  fi
+
+  # Format: scan_dir<TAB>scan_id repo mode date status (fzf --with-nth hides field 1)
+  local lines
+  lines=$(echo "$entries" | awk -F'\t' '{printf "%s\t%-20s %-20s %-10s %-24s %s\n", $1, $2, $3, $4, $5, $6}')
+
+  local selected
+  selected=$(echo "$lines" \
+    | fzf --ansi --tmux 85%,80% \
+      --delimiter $'\t' --with-nth=2 \
+      --header "Scan Reports  |  enter: drill into zones  ctrl-o: open report" \
+      --preview '
+        scan_dir={1}
+        if [[ -f "$scan_dir/report.md" ]]; then
+          bat --language=md --style=plain --color=always "$scan_dir/report.md" 2>/dev/null || cat "$scan_dir/report.md"
+        elif [[ -f "$scan_dir/raw_results.md" ]]; then
+          bat --language=md --style=plain --color=always "$scan_dir/raw_results.md" 2>/dev/null || cat "$scan_dir/raw_results.md"
+        else
+          echo "No report file found."
+        fi
+      ' \
+      --preview-window "right:60%" \
+      --bind "ctrl-o:execute(
+        scan_dir={1}
+        report=\"\"
+        [[ -f \"\$scan_dir/report.md\" ]] && report=\"\$scan_dir/report.md\"
+        [[ -z \"\$report\" && -f \"\$scan_dir/raw_results.md\" ]] && report=\"\$scan_dir/raw_results.md\"
+        [[ -n \"\$report\" ]] && \${PAGER:-less} \"\$report\"
+      )") || return 0
+
+  local scan_dir
+  scan_dir=$(echo "$selected" | cut -f1)
+  [[ -d "$scan_dir" ]] && _scanreport_browse_zones "$scan_dir"
+}
+
+# Level 2: browse zone result files within a scan
+_scanreport_browse_zones() {
+  local scan_dir="$1"
+  local zone_files
+  zone_files=$(find "$scan_dir" -name 'agent-*.md' -type f 2>/dev/null | sort)
+
+  if [[ -z "$zone_files" ]]; then
+    # No zone files; show the main report instead
+    local report
+    report=$(_scanreport_best_report "$scan_dir")
+    if [[ -n "$report" ]]; then
+      _scanreport_render_md "$report"
+    else
+      echo "No zone results found in $scan_dir"
+    fi
+    return 0
+  fi
+
+  local selected
+  selected=$(echo "$zone_files" \
+    | fzf --ansi --tmux 85%,80% \
+      --header "Zone Results  |  enter: open  esc: back" \
+      --preview 'bat --language=md --style=plain --color=always {} 2>/dev/null || cat {}' \
+      --preview-window "right:60%") || return 0
+
+  [[ -n "$selected" ]] && ${PAGER:-${EDITOR:-less}} "$selected"
+}
+
+# ------------------------------------------------------------------------------
+# Show a specific scan by ID
+# ------------------------------------------------------------------------------
+
+_scanreport_show() {
+  local scan_id="$1"
+
+  local match=""
+  for scan_json in "$SCAN_DIR"/*/*/scan.json; do
+    [[ -f "$scan_json" ]] || continue
+    local id
+    id=$(jq -r '.id // ""' "$scan_json" 2>/dev/null)
+    if [[ "$id" == "$scan_id" ]]; then
+      match=$(dirname "$scan_json")
+      break
+    fi
+  done
+
+  if [[ -z "$match" ]]; then
+    echo "Scan '$scan_id' not found in $SCAN_DIR"
+    return 1
+  fi
+
+  local report
+  report=$(_scanreport_best_report "$match")
+  if [[ -n "$report" ]]; then
+    _scanreport_render_md "$report"
+  else
+    echo "No report generated for scan '$scan_id'. Run 'scan collect' first."
+  fi
+}
+
+# ==============================================================================
+# Main entry point
+# ==============================================================================
+
+scanreport() {
+  case "${1:-}" in
+    list|ls) _scanreport_list ;;
+    latest)  _scanreport_latest ;;
+    "")      _scanreport_browse ;;
+    *)       _scanreport_show "$1" ;;
+  esac
+}
