@@ -1,0 +1,472 @@
+# ==============================================================================
+# Review: Agent-aware change review system
+# ==============================================================================
+#
+# AI-comprehended summaries of git changes across agent branches/worktrees.
+# Diffs go to a model first; what you see is the model's understanding of
+# what changed -- cached per commit SHA so it's instant on re-review.
+#
+# Usage:
+#   review                    # overview of all divergent branches (or swarm)
+#   review [swarm_id]         # overview scoped to a specific swarm
+#   review <agent>            # single agent deep dive (file list)
+#   review <agent> <file>     # single file AI-explained diff
+#   review conflicts          # cross-agent conflict analysis
+#   reviewd                   # dashboard mode (persistent pane)
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+REVIEW_DIR="$HOME/.local/share/omacmux/reviews"
+
+_review_ensure_dirs() {
+  mkdir -p "$REVIEW_DIR"/{commits,branches,conflicts}
+}
+
+_review_check_git() {
+  git rev-parse --git-dir &>/dev/null || { echo "review: not a git repository."; return 1; }
+}
+
+_review_default_branch() {
+  local branch
+  branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+  [[ -z "$branch" ]] && branch="main"
+  # Verify the branch exists
+  if ! git rev-parse --verify "origin/$branch" &>/dev/null; then
+    branch="master"
+  fi
+  echo "$branch"
+}
+
+# Slugify a branch name for use in filenames
+_review_slug() {
+  echo "$1" | tr '/' '-' | tr ' ' '-'
+}
+
+# Get or generate a cached commit summary
+_review_commit_summary() {
+  local sha="$1"
+  _review_ensure_dirs
+  local cache="$REVIEW_DIR/commits/${sha}.md"
+  if [[ -f "$cache" ]]; then
+    cat "$cache"
+    return
+  fi
+  local diff
+  diff=$(git show --stat --patch "$sha" 2>/dev/null | head -500)
+  [[ -z "$diff" ]] && { echo "No diff for $sha"; return; }
+  local summary
+  summary=$(claude --print -p "Summarize this git diff concisely. Focus on WHAT changed and WHY (intent), not line-by-line details. Be specific about function/file names. One paragraph max." "$diff" 2>/dev/null)
+  if [[ -n "$summary" ]]; then
+    echo "$summary" > "$cache"
+    echo "$summary"
+  else
+    echo "Could not generate summary for $sha"
+  fi
+}
+
+# Get or generate a cached branch summary
+_review_branch_summary() {
+  local branch="$1" base="$2"
+  _review_ensure_dirs
+  local tip_sha
+  tip_sha=$(git rev-parse "$branch" 2>/dev/null)
+  [[ -z "$tip_sha" ]] && return
+  local slug
+  slug=$(_review_slug "$branch")
+  local cache="$REVIEW_DIR/branches/${slug}@${tip_sha}.md"
+  if [[ -f "$cache" ]]; then
+    cat "$cache"
+    return
+  fi
+
+  # Collect per-commit summaries
+  local commits summaries=""
+  commits=$(git log --format='%H' "${base}..${branch}" 2>/dev/null)
+  [[ -z "$commits" ]] && { echo "No commits diverging from $base"; return; }
+
+  while IFS= read -r sha; do
+    local s
+    s=$(_review_commit_summary "$sha")
+    summaries+="- $s"$'\n'
+  done <<< "$commits"
+
+  local aggregate
+  aggregate=$(claude --print -p "These are summaries of individual commits on a branch. Synthesize into one coherent summary of the total work done. Focus on the overall goal and key changes. 2-3 sentences max." "$summaries" 2>/dev/null)
+  if [[ -n "$aggregate" ]]; then
+    echo "$aggregate" > "$cache"
+    echo "$aggregate"
+  else
+    echo "$summaries" > "$cache"
+    echo "$summaries"
+  fi
+}
+
+# Annotated diff for preview
+_review_annotated_diff() {
+  local branch="$1" base="$2" file="$3"
+  local diff
+  diff=$(git diff "${base}...${branch}" -- "$file" 2>/dev/null)
+  [[ -z "$diff" ]] && { echo "No changes in $file"; return; }
+  local explanation
+  explanation=$(claude --print -p "Explain what this diff does. Be concise and specific. Focus on intent." "$diff" 2>/dev/null)
+  if [[ -n "$explanation" ]]; then
+    printf '\033[0;36m--- AI Summary ---\033[0m\n%s\n\n\033[0;36m--- Diff ---\033[0m\n' "$explanation"
+  fi
+  echo "$diff" | bat --style=numbers --color=always -l diff 2>/dev/null || echo "$diff"
+}
+
+# Detect divergent branches (fallback when no swarm)
+_review_divergent_branches() {
+  local base="$1"
+  git for-each-ref --format='%(refname:short)' refs/heads/ | while read -r branch; do
+    [[ "$branch" == "$base" ]] && continue
+    local ahead
+    ahead=$(git rev-list --count "${base}..${branch}" 2>/dev/null)
+    [[ "$ahead" -gt 0 ]] && echo "$branch"
+  done
+}
+
+# Collect branch info: branch_name insertions deletions files_changed
+_review_branch_stats() {
+  local branch="$1" base="$2"
+  local stat
+  stat=$(git diff "${base}...${branch}" --stat 2>/dev/null | tail -1)
+  local files ins del
+  files=$(echo "$stat" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+')
+  ins=$(echo "$stat" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')
+  del=$(echo "$stat" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+')
+  echo "${files:-0} +${ins:-0}/-${del:-0}"
+}
+
+# Source path for FZF subshells
+_review_src() {
+  echo "${OMACMUX_PATH:-$HOME/.local/share/omacmux}/config/bash/fns/review"
+}
+
+# Collect branches to review, populating _rv_branches and _rv_agents arrays.
+# Sets _rv_base to the resolved base branch.
+# Usage: _review_collect_branches [swarm_id]
+_review_collect_branches() {
+  local swarm_id="$1"
+  _rv_branches=()
+  _rv_agents=()
+  _rv_base=$(_review_default_branch)
+
+  local swarm_dir=""
+  if [[ -n "$swarm_id" ]]; then
+    swarm_dir="$HOME/.local/share/omacmux/swarms/$swarm_id"
+    [[ ! -d "$swarm_dir" ]] && return 1
+  else
+    local current_swarm
+    current_swarm=$(tmux show-option -wqv @swarm_id 2>/dev/null)
+    [[ -n "$current_swarm" ]] && swarm_dir="$HOME/.local/share/omacmux/swarms/$current_swarm"
+  fi
+
+  if [[ -n "$swarm_dir" && -d "$swarm_dir" ]]; then
+    local swarm_base
+    swarm_base=$(jq -r '.base_branch // empty' "$swarm_dir/swarm.json" 2>/dev/null)
+    [[ -n "$swarm_base" ]] && _rv_base="$swarm_base"
+    for agent_file in "$swarm_dir/agents/"*.json; do
+      [[ -f "$agent_file" ]] || continue
+      local agent_id branch
+      agent_id=$(jq -r '.id' "$agent_file")
+      branch=$(jq -r '.branch // empty' "$agent_file")
+      if [[ -n "$branch" && "$branch" != "$_rv_base" ]]; then
+        _rv_agents+=("$agent_id")
+        _rv_branches+=("$branch")
+      fi
+    done
+  fi
+
+  # Fallback: detect divergent branches
+  if (( ${#_rv_branches[@]} == 0 )); then
+    while IFS= read -r b; do
+      [[ -n "$b" ]] || continue
+      _rv_branches+=("$b")
+      _rv_agents+=("$b")
+    done < <(_review_divergent_branches "$_rv_base")
+  fi
+}
+
+# ==============================================================================
+# Top-level overview: review [swarm_id]
+# ==============================================================================
+
+_review_overview() {
+  local swarm_id="$1"
+
+  _review_collect_branches "$swarm_id" || { echo "review: swarm '$swarm_id' not found."; return 1; }
+  local base="$_rv_base"
+  local -a branches=("${_rv_branches[@]}") agents=("${_rv_agents[@]}")
+
+  if (( ${#branches[@]} == 0 )); then
+    echo "review: no divergent branches found from $base."
+    return 0
+  fi
+
+  # Build fzf list
+  local lines=""
+  for ((i=0; i<${#branches[@]}; i++)); do
+    local agent="${agents[$i]}"
+    local branch="${branches[$i]}"
+    local stats
+    stats=$(_review_branch_stats "$branch" "$base")
+    local files="${stats%% *}"
+    local changes="${stats#* }"
+    lines+=$(printf "%s\t%s\t%s\t%s files" "$agent" "$branch" "$changes" "$files")
+    lines+=$'\n'
+  done
+
+  local src
+  src=$(_review_src)
+
+  echo "$lines" | column -t -s $'\t' | fzf --ansi --tmux 85%,80% \
+    --header "enter: drill down  ctrl-r: re-summarize  ctrl-c: conflicts" \
+    --preview "
+      source \"$src\" 2>/dev/null
+      branch=\$(echo {} | awk '{print \$2}')
+      _review_branch_summary \"\$branch\" \"$base\"
+    " \
+    --preview-window "right:50%:wrap" \
+    --bind "enter:abort+execute(
+      source \"$src\" 2>/dev/null
+      agent=\$(echo {} | awk '{print \$1}')
+      branch=\$(echo {} | awk '{print \$2}')
+      _review_agent_drilldown \"\$agent\" \"\$branch\" \"$base\"
+    )" \
+    --bind "ctrl-r:reload(
+      source \"$src\" 2>/dev/null
+      branch=\$(echo {} | awk '{print \$2}')
+      tip=\$(git rev-parse \"\$branch\" 2>/dev/null)
+      slug=\$(_review_slug \"\$branch\")
+      rm -f \"$REVIEW_DIR/branches/\${slug}@\${tip}.md\"
+      echo 'Re-summarizing...'
+    )"
+}
+
+# ==============================================================================
+# Agent drilldown: file list for a single agent/branch
+# ==============================================================================
+
+_review_agent_drilldown() {
+  local agent="$1" branch="$2" base="$3"
+  _review_ensure_dirs
+
+  [[ -z "$base" ]] && base=$(_review_default_branch)
+  [[ -z "$branch" ]] && branch="$agent"
+
+  local files
+  files=$(git diff "${base}...${branch}" --name-only 2>/dev/null)
+  [[ -z "$files" ]] && { echo "review: no files changed on $branch vs $base."; return 0; }
+
+  local src
+  src=$(_review_src)
+
+  echo "$files" | fzf --tmux 85%,80% \
+    --header "[$agent] $branch vs $base  |  enter: full diff" \
+    --preview "
+      source \"$src\" 2>/dev/null
+      _review_annotated_diff \"$branch\" \"$base\" {}
+    " \
+    --preview-window "right:60%:wrap" \
+    --bind "enter:abort+execute(
+      git diff \"${base}...${branch}\" -- {} | bat --style=numbers --color=always -l diff 2>/dev/null || git diff \"${base}...${branch}\" -- {} | less -R
+    )"
+}
+
+# ==============================================================================
+# Single file AI-explained diff
+# ==============================================================================
+
+_review_file_explain() {
+  local agent="$1" file="$2"
+  _review_check_git || return 1
+  _review_ensure_dirs
+
+  local base branch
+  base=$(_review_default_branch)
+  branch="$agent"
+
+  local diff
+  diff=$(git diff "${base}...${branch}" -- "$file" 2>/dev/null)
+  [[ -z "$diff" ]] && { echo "review: no diff for '$file' on branch '$branch'."; return 1; }
+
+  printf '\033[0;36m=== AI Explanation ===\033[0m\n\n'
+  claude --print -p "Explain what this diff does in detail. Cover the intent, what changed, and any implications." "$diff" 2>/dev/null || echo "Could not generate explanation."
+  printf '\n\033[0;36m=== Raw Diff ===\033[0m\n\n'
+  echo "$diff" | bat --style=numbers --color=always -l diff 2>/dev/null || echo "$diff"
+}
+
+# ==============================================================================
+# Conflict analysis
+# ==============================================================================
+
+_review_conflicts() {
+  local swarm_id="$1"
+  _review_check_git || return 1
+
+  _review_collect_branches "$swarm_id"
+  local base="$_rv_base"
+  local -a branches=("${_rv_branches[@]}")
+
+  if (( ${#branches[@]} < 2 )); then
+    echo "review conflicts: need at least 2 divergent branches."
+    return 0
+  fi
+
+  # Find files touched by multiple branches
+  declare -A file_branches
+  for branch in "${branches[@]}"; do
+    local files
+    files=$(git diff "${base}...${branch}" --name-only 2>/dev/null)
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && file_branches["$f"]+="$branch "
+    done <<< "$files"
+  done
+
+  local conflict_lines=""
+  for f in "${!file_branches[@]}"; do
+    local blist="${file_branches[$f]}"
+    local count
+    count=$(echo "$blist" | wc -w | tr -d ' ')
+    if (( count > 1 )); then
+      conflict_lines+=$(printf "%s\t%s branches\t%s" "$f" "$count" "$blist")
+      conflict_lines+=$'\n'
+    fi
+  done
+
+  if [[ -z "$conflict_lines" ]]; then
+    echo "review conflicts: no overlapping files found across branches."
+    return 0
+  fi
+
+  local src
+  src=$(_review_src)
+
+  echo "$conflict_lines" | column -t -s $'\t' | fzf --ansi --tmux 85%,80% \
+    --header "Files modified by multiple agents" \
+    --preview "
+      file=\$(echo {} | awk '{print \$1}')
+      branches=\"${branches[*]}\"
+      diffs=''
+      for b in \$branches; do
+        d=\$(git diff \"${base}...\$b\" -- \"\$file\" 2>/dev/null)
+        if [[ -n \"\$d\" ]]; then
+          diffs+=\"--- \$b ---\"
+          diffs+=\$'\n'
+          diffs+=\"\$d\"
+          diffs+=\$'\n\n'
+        fi
+      done
+      claude --print -p 'These files were modified by multiple agents working in parallel. For each file, explain whether the changes are compatible or conflicting, and what would happen on merge.' \"\$diffs\" 2>/dev/null || echo \"\$diffs\"
+    " \
+    --preview-window "right:60%:wrap"
+}
+
+# ==============================================================================
+# Dashboard mode
+# ==============================================================================
+
+reviewd() {
+  _review_check_git || return 1
+  _review_ensure_dirs
+
+  local base
+  base=$(_review_default_branch)
+
+  local src
+  src=$(_review_src)
+
+  tmux split-window -h -d "bash -c '
+    source \"$src\" 2>/dev/null
+    watch -n 10 -c bash -c \"
+      source \\\"$src\\\" 2>/dev/null
+      _reviewd_render \\\"$base\\\"
+    \"
+  '"
+  echo "review: dashboard pane opened (refreshes every 10s)."
+}
+
+_reviewd_render() {
+  local base="$1"
+  [[ -z "$base" ]] && base=$(_review_default_branch)
+
+  printf '\033[0;36m=== Review Dashboard ===\033[0m  %s\n\n' "$(date '+%H:%M:%S')"
+  printf '\033[2m%-15s %-30s %6s %8s %20s\033[0m\n' "AGENT" "BRANCH" "AHEAD" "FILES" "LAST COMMIT"
+
+  local swarm_dir=""
+  local current_swarm
+  current_swarm=$(tmux show-option -wqv @swarm_id 2>/dev/null)
+  [[ -n "$current_swarm" ]] && swarm_dir="$HOME/.local/share/omacmux/swarms/$current_swarm"
+
+  local -a branches agents
+  if [[ -n "$swarm_dir" && -d "$swarm_dir" ]]; then
+    local swarm_base
+    swarm_base=$(jq -r '.base_branch // empty' "$swarm_dir/swarm.json" 2>/dev/null)
+    [[ -n "$swarm_base" ]] && base="$swarm_base"
+    for agent_file in "$swarm_dir/agents/"*.json; do
+      [[ -f "$agent_file" ]] || continue
+      local agent_id branch
+      agent_id=$(jq -r '.id' "$agent_file")
+      branch=$(jq -r '.branch // empty' "$agent_file")
+      if [[ -n "$branch" && "$branch" != "$base" ]]; then
+        agents+=("$agent_id")
+        branches+=("$branch")
+      fi
+    done
+  fi
+
+  if (( ${#branches[@]} == 0 )); then
+    while IFS= read -r b; do
+      [[ -n "$b" ]] && branches+=("$b") && agents+=("$b")
+    done < <(_review_divergent_branches "$base")
+  fi
+
+  for ((i=0; i<${#branches[@]}; i++)); do
+    local agent="${agents[$i]}"
+    local branch="${branches[$i]}"
+    local ahead files last_time
+    ahead=$(git rev-list --count "${base}..${branch}" 2>/dev/null || echo 0)
+    files=$(git diff "${base}...${branch}" --name-only 2>/dev/null | wc -l | tr -d ' ')
+    last_time=$(git log -1 --format='%cr' "$branch" 2>/dev/null || echo "unknown")
+    printf "%-15s %-30s %6s %8s %20s\n" "$agent" "$branch" "$ahead" "$files" "$last_time"
+  done
+}
+
+# ==============================================================================
+# Main entry point
+# ==============================================================================
+
+review() {
+  _review_check_git || return 1
+  _review_ensure_dirs
+
+  case "${1:-}" in
+    "")
+      _review_overview
+      ;;
+    conflicts)
+      _review_conflicts "$2"
+      ;;
+    *)
+      if [[ -n "$2" ]]; then
+        # review <agent> <file>
+        _review_file_explain "$1" "$2"
+      else
+        # Could be swarm_id or agent name
+        # Check if it's a swarm directory first
+        if [[ -d "$HOME/.local/share/omacmux/swarms/$1" ]]; then
+          _review_overview "$1"
+        elif git rev-parse --verify "$1" &>/dev/null; then
+          # It's a branch/ref -- treat as agent drilldown
+          _review_agent_drilldown "$1" "$1"
+        else
+          # Try as swarm ID anyway
+          _review_overview "$1"
+        fi
+      fi
+      ;;
+  esac
+}
