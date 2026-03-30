@@ -10,9 +10,9 @@ i=0
 while IFS= read -r session; do
   letter=$(printf "\\$(printf '%03o' $((65 + i)))")
   if [ "$session" = "$current" ]; then
-    format+="#[fg=#121212,bg=#e68e0d,bold] ${letter}:${session} #[bg=default]"
+    format+="#[fg=#121212,bg=#e68e0d,bold] ${letter}:${session} #[bg=default] "
   else
-    format+="#[fg=#8a8a8d] ${letter}:${session} "
+    format+="#[fg=#5f9ea0] ${letter}:${session}  "
   fi
   i=$((i + 1))
 done < <(tmux list-sessions -F '#S' 2>/dev/null | grep -v '^_stash$' | grep -v '~')
