@@ -1,0 +1,188 @@
+# ==============================================================================
+# Mesh Sync: rsync daemon for syncing swarm state across Tailscale devices
+# ==============================================================================
+#
+# Keeps swarm state directories in sync across mesh devices using rsync over
+# Tailscale SSH. Follows the same daemon pattern as autocommit.
+#
+# Usage:
+#   meshsync on [--interval <secs>] [--devices <dev1,dev2,...>]
+#   meshsync off          Stop the sync daemon
+#   meshsync status       Show current sync state
+
+# ------------------------------------------------------------------------------
+# Stub guards
+# ------------------------------------------------------------------------------
+
+command -v _mesh_devices &>/dev/null || _mesh_devices() { :; }
+command -v _mesh_picks &>/dev/null || _mesh_picks() { :; }
+command -v _mesh_device_user &>/dev/null || _mesh_device_user() { :; }
+command -v _mesh_device_ip &>/dev/null || _mesh_device_ip() { :; }
+command -v _voice_say &>/dev/null || _voice_say() { :; }
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+_meshsync_state_dir="$HOME/.local/share/omacmux/meshsync"
+
+_meshsync_guard() {
+  command -v rsync &>/dev/null || {
+    echo -e "\033[31mrsync not found.\033[0m"
+    return 1
+  }
+  command -v tailscale &>/dev/null || {
+    echo -e "\033[31mtailscale not found.\033[0m"
+    return 1
+  }
+}
+
+# ------------------------------------------------------------------------------
+# Subcommands
+# ------------------------------------------------------------------------------
+
+_meshsync_on() {
+  local interval=10
+  local device_csv=""
+  local devices=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --interval) interval="$2"; shift 2 ;;
+      --devices)  device_csv="$2"; shift 2 ;;
+      *)          shift ;;
+    esac
+  done
+
+  if [[ -n "$device_csv" ]]; then
+    IFS=',' read -ra devices <<< "$device_csv"
+  else
+    local picked
+    picked=$(_mesh_picks) || { echo "No devices selected."; return 1; }
+    while IFS= read -r name; do
+      devices+=("$name")
+    done <<< "$picked"
+  fi
+
+  [[ ${#devices[@]} -eq 0 ]] && { echo "No devices specified."; return 1; }
+
+  local swarm_id
+  swarm_id=$(tmux display-message -p '#{window_option @swarm_id}' 2>/dev/null | grep -v '^$')
+  [[ -z "$swarm_id" ]] && {
+    echo -e "\033[31mNo active swarm (missing @swarm_id).\033[0m"
+    return 1
+  }
+
+  local swarm_state_dir="$HOME/.local/share/omacmux/swarms/$swarm_id"
+  [[ -d "$swarm_state_dir" ]] || {
+    echo -e "\033[31mSwarm state dir not found: $swarm_state_dir\033[0m"
+    return 1
+  }
+
+  mkdir -p "$_meshsync_state_dir"
+
+  local state_file="$_meshsync_state_dir/daemon.json"
+  if [[ -f "$state_file" ]]; then
+    local pid
+    pid=$(jq -r '.pid' "$state_file" 2>/dev/null)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo -e "\033[33mMesh sync already active (PID: $pid)\033[0m"
+      return 0
+    fi
+    rm -f "$state_file"
+  fi
+
+  local device_list="${devices[*]}"
+
+  # Background daemon: rsync swarm state to each device on interval
+  (
+    IFS=' ' read -ra _devs <<< "$device_list"
+    while true; do
+      [[ -f "$_meshsync_state_dir/daemon.stop" ]] && \
+        rm -f "$_meshsync_state_dir/daemon.stop" "$_meshsync_state_dir/daemon.json" && exit 0
+
+      for device in "${_devs[@]}"; do
+        ip=$(_mesh_device_ip "$device")
+        suser=$(_mesh_device_user "$device")
+        [[ -z "$ip" ]] && continue
+        rsync -az --delete \
+          -e "ssh" \
+          "$swarm_state_dir/" \
+          "$suser@$ip:$swarm_state_dir/" 2>/dev/null
+      done
+
+      sleep "$interval"
+    done
+  ) &>/dev/null & disown
+
+  local bg_pid=$!
+
+  local devices_json
+  devices_json=$(printf '%s\n' "${devices[@]}" | jq -R . | jq -s .)
+  jq -n \
+    --argjson pid "$bg_pid" \
+    --argjson interval "$interval" \
+    --argjson devices "$devices_json" \
+    --arg swarm_id "$swarm_id" \
+    --arg started "$(date -Iseconds)" \
+    '{pid: $pid, interval: $interval, devices: $devices, swarm_id: $swarm_id, started: $started}' \
+    > "$state_file"
+
+  echo -e "\033[32mMesh sync ON\033[0m — every ${interval}s to ${#devices[@]} device(s) (PID: $bg_pid)"
+  _voice_say "Mesh sync started with ${#devices[@]} devices, every ${interval} seconds"
+}
+
+_meshsync_off() {
+  local state_file="$_meshsync_state_dir/daemon.json"
+
+  if [[ ! -f "$state_file" ]]; then
+    echo -e "\033[33mMesh sync is not active.\033[0m"
+    return 0
+  fi
+
+  local pid
+  pid=$(jq -r '.pid' "$state_file" 2>/dev/null)
+
+  touch "$_meshsync_state_dir/daemon.stop"
+  kill "$pid" 2>/dev/null
+  rm -f "$state_file"
+
+  echo -e "\033[32mMesh sync OFF\033[0m"
+  _voice_say "Mesh sync stopped"
+}
+
+_meshsync_status() {
+  local state_file="$_meshsync_state_dir/daemon.json"
+
+  if [[ -f "$state_file" ]]; then
+    local pid interval started swarm_id devices
+    local _fields
+    _fields=$(jq -r '[.pid, .interval, .started, .swarm_id, (.devices | join(", "))] | @tsv' "$state_file" 2>/dev/null)
+    IFS=$'\t' read -r pid interval started swarm_id devices <<< "$_fields"
+
+    if kill -0 "$pid" 2>/dev/null; then
+      echo -e "\033[32mActive\033[0m — every ${interval}s (PID: $pid)"
+      echo "  Swarm:   $swarm_id"
+      echo "  Devices: $devices"
+      echo "  Started: $started"
+    else
+      rm -f "$state_file"
+      echo -e "\033[33mSync daemon died, cleaning up.\033[0m"
+    fi
+  else
+    echo -e "\033[2mInactive\033[0m"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Main dispatch
+# ------------------------------------------------------------------------------
+
+meshsync() {
+  case "${1:-status}" in
+    on|start)  shift; _meshsync_guard && _meshsync_on "$@" ;;
+    off|stop)  shift; _meshsync_off ;;
+    status)    shift 2>/dev/null; _meshsync_status ;;
+    *)         echo "Usage: meshsync [on|off|status]" ;;
+  esac
+}
