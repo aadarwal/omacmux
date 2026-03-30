@@ -2,17 +2,6 @@
 # Session Management
 # ==============================================================================
 
-# Attach from outside tmux using a linked session group.
-# Each terminal gets its own current-window pointer while sharing all windows.
-# The linked session auto-destroys when the client detaches.
-_t_attach() {
-  local name="$1"
-  local link="${name}~$$"
-  tmux new-session -d -t "=$name" -s "$link"
-  tmux set-option -t "=$link" destroy-unattached on
-  tmux attach-session -t "=$link"
-}
-
 # Smart tmux entry point
 # Usage:
 #   t            -> outside tmux: attach last session or create "Work"
@@ -30,13 +19,7 @@ t() {
       tp
       return
     fi
-    local _last
-    _last=$(tmux list-sessions -F '#S' 2>/dev/null | grep -v '~' | head -1)
-    if [[ -n $_last ]]; then
-      _t_attach "$_last"
-    else
-      tmux new-session -s Work
-    fi
+    tmux attach 2>/dev/null || tmux new-session -s Work
     return
   fi
 
@@ -58,7 +41,7 @@ t() {
     if [[ -n $TMUX ]]; then
       tmux switch-client -t "=$name"
     else
-      _t_attach "$name"
+      tmux attach-session -t "=$name"
     fi
     return
   fi
@@ -103,19 +86,13 @@ tn() {
 # Usage: tk [session_name]
 tk() {
   local name="${1:-$(tmux display-message -p '#S' 2>/dev/null)}"
-  name="${name%%~*}"  # normalize grouped session name to base
   [[ -z $name ]] && { echo "Usage: tk [session_name]"; return 1; }
-
-  # Kill linked group sessions first, then the base session
-  tmux list-sessions -F '#S' 2>/dev/null | grep "^${name}~" | while read -r s; do
-    tmux kill-session -t "=$s" 2>/dev/null
-  done
   tmux kill-session -t "=$name" 2>/dev/null && echo "Killed session '$name'" || echo "Session '$name' not found."
 }
 
 # List all tmux sessions
 tl() {
-  tmux list-sessions 2>/dev/null | grep -v '~' || echo "No tmux sessions running."
+  tmux list-sessions 2>/dev/null || echo "No tmux sessions running."
 }
 
 # fzf session picker/switcher
@@ -125,9 +102,9 @@ tp() {
 
   local fmt='#{session_name}: #{session_windows} windows#{?session_attached, (attached),}'
   local selected
-  selected=$(tmux list-sessions -F "$fmt" | grep -v '^_stash:' | grep -v '~' | fzf --tmux 60%,40% \
+  selected=$(tmux list-sessions -F "$fmt" | grep -v '^_stash:' | fzf --tmux 60%,40% \
     --header "ctrl-x: kill  enter: switch" \
-    --bind "ctrl-x:execute-silent(tmux kill-session -t {1})+reload(tmux list-sessions -F \"$fmt\" 2>/dev/null | grep -v '^_stash:' | grep -v '~' || true)" \
+    --bind "ctrl-x:execute-silent(tmux kill-session -t {1})+reload(tmux list-sessions -F \"$fmt\" 2>/dev/null | grep -v '^_stash:' || true)" \
     --delimiter ":" \
     --preview "tmux capture-pane -e -p -t {1}:" \
     --preview-window "right:60%") || return 0
@@ -137,7 +114,7 @@ tp() {
   if [[ -n $TMUX ]]; then
     tmux switch-client -t "=$session_name"
   else
-    _t_attach "$session_name"
+    tmux attach-session -t "=$session_name"
   fi
 }
 

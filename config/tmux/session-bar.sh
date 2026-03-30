@@ -3,7 +3,6 @@
 # Called by hooks on session events and on config reload
 
 current=$(tmux display-message -p '#S')
-current="${current%%~*}"  # normalize grouped session name to base
 format=""
 i=0
 
@@ -15,6 +14,6 @@ while IFS= read -r session; do
     format+="#[fg=#8a8a8d] ${letter}:${session} "
   fi
   i=$((i + 1))
-done < <(tmux list-sessions -F '#S' 2>/dev/null | grep -v '^_stash$' | grep -v '~')
+done < <(tmux list-sessions -F '#S' 2>/dev/null | grep -v '^_stash$')
 
 tmux set -g status-format[0] "$format"
