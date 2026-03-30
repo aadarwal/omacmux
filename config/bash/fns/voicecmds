@@ -1,0 +1,153 @@
+# ==============================================================================
+# Voice Commands — spoken-friendly functions for Wispr Flow dictation
+# ==============================================================================
+#
+# Commands designed to be invoked naturally via voice:
+#   vibe [n|stop]      Start/stop agent swarm + autocommit
+#   check              Concise status: agents + files changed
+#   ship [branch]      Push and report PR URL
+#   focus <agent>      Switch to agent pane
+#   recap              AI summary of branch changes
+
+# ------------------------------------------------------------------------------
+# Stub guards (allow standalone sourcing before the voice file loads)
+# ------------------------------------------------------------------------------
+
+command -v _voice_say &>/dev/null || _voice_say() { :; }
+command -v _voice_sound &>/dev/null || _voice_sound() { :; }
+command -v _voice_enabled &>/dev/null || _voice_enabled() { return 1; }
+command -v _an_resolve &>/dev/null || _an_resolve() { echo "$1"; }
+command -v _swarm_dir &>/dev/null || _swarm_dir() { return 1; }
+command -v _swarm_agent_pane &>/dev/null || _swarm_agent_pane() { return 1; }
+
+# ------------------------------------------------------------------------------
+# vibe [n|stop] — start or stop agent swarm with autocommit
+# ------------------------------------------------------------------------------
+
+vibe() {
+  git rev-parse --is-inside-work-tree &>/dev/null || {
+    echo -e "\033[31mvibe: not a git repo\033[0m"; return 1
+  }
+  [[ -z "$TMUX" ]] && {
+    echo -e "\033[31mvibe: requires tmux\033[0m"; return 1
+  }
+
+  local arg="${1:-}"
+
+  if [[ "$arg" == "stop" ]]; then
+    _voice_say "Vibe mode stopped"
+    swarm kill 2>/dev/null
+    acm off 2>/dev/null
+    _voice_sound done
+    return 0
+  fi
+
+  local n="${arg:-4}"
+  _voice_sound start
+  _voice_say "Starting vibe mode with $n agents"
+  acm on 120
+  swarm star "$n" cxx
+}
+
+# ------------------------------------------------------------------------------
+# check — concise status (agents + files changed)
+# ------------------------------------------------------------------------------
+
+check() {
+  local agents=0
+  local swarm_dir
+  swarm_dir=$(_swarm_dir 2>/dev/null)
+  if [[ -n "$swarm_dir" && -d "$swarm_dir/agents" ]]; then
+    agents=$(find "$swarm_dir/agents" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+  fi
+
+  local files
+  files=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+
+  local sentence="$agents agents active, $files files changed"
+  _voice_say "$sentence"
+  echo -e "\033[36m$agents\033[0m agents active, \033[33m$files\033[0m files changed"
+}
+
+# ------------------------------------------------------------------------------
+# ship [branch] — push current branch and report PR URL
+# ------------------------------------------------------------------------------
+
+ship() {
+  local branch="${1:-$(git branch --show-current 2>/dev/null)}"
+  [[ -z "$branch" ]] && {
+    echo -e "\033[31mship: not on a branch\033[0m"; return 1
+  }
+
+  _voice_say "Shipping $branch"
+  git push origin "$branch" 2>&1
+
+  local pr_url
+  pr_url=$(gh pr view --json url -q .url 2>/dev/null)
+  [[ -n "$pr_url" ]] && echo -e "\033[32mPR:\033[0m $pr_url"
+
+  _voice_sound done
+  _voice_say "Shipped"
+}
+
+# ------------------------------------------------------------------------------
+# focus <name-or-number> — switch to agent pane
+# ------------------------------------------------------------------------------
+
+focus() {
+  [[ -z "$1" ]] && {
+    echo -e "\033[31mfocus: specify agent name or number\033[0m"; return 1
+  }
+
+  local agent_id
+  agent_id=$(_an_resolve "$1")
+
+  local pane_id
+  pane_id=$(_swarm_agent_pane "$agent_id" 2>/dev/null)
+  [[ -z "$pane_id" || "$pane_id" == "null" ]] && {
+    echo -e "\033[31mfocus: agent '$agent_id' not found or has no pane\033[0m"; return 1
+  }
+
+  tmux select-pane -t "$pane_id"
+  _voice_say "Focusing $agent_id"
+}
+
+# ------------------------------------------------------------------------------
+# recap — summarize what changed on this branch
+# ------------------------------------------------------------------------------
+
+recap() {
+  _voice_say "Generating recap"
+
+  local merge_base
+  merge_base=$(git merge-base HEAD origin/master 2>/dev/null)
+
+  local stats=""
+  local log_info=""
+
+  if [[ -n "$merge_base" ]]; then
+    stats=$(git diff --stat "$merge_base"..HEAD 2>/dev/null)
+    log_info=$(git log --oneline "$merge_base"..HEAD 2>/dev/null)
+  else
+    stats=$(git diff --stat HEAD~5..HEAD 2>/dev/null)
+    log_info=$(git log --oneline -5 2>/dev/null)
+  fi
+
+  local commit_count
+  commit_count=$(echo "$log_info" | grep -c . 2>/dev/null || echo "0")
+  local file_count
+  file_count=$(echo "$stats" | tail -1 | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
+
+  local summary="$commit_count commits touching $file_count files"
+
+  if command -v review &>/dev/null; then
+    local review_out
+    review_out=$(review 2>/dev/null)
+    [[ -n "$review_out" ]] && summary="$summary. $review_out"
+  fi
+
+  _voice_say "$summary"
+  echo -e "\033[1mRecap:\033[0m $summary"
+  [[ -n "$stats" ]] && echo "" && echo "$stats"
+  [[ -n "$log_info" ]] && echo "" && echo -e "\033[2m$log_info\033[0m"
+}
