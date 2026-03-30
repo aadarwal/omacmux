@@ -1,0 +1,411 @@
+# ==============================================================================
+# Swarm Extensions: Enhanced planning, status, and merge workflows
+# ==============================================================================
+#
+# Extends the swarm system without modifying the core swarm file.
+# Both files are sourced into the same shell, so all _swarm_* helpers are
+# available here.
+#
+# Usage:
+#   swarmx plan star 4 cx      # dry-run: show what WOULD happen
+#   swarmx status              # enhanced status with git stats
+#   swarmx merge               # interactive fzf merge workflow
+#   swarmx help                # show usage
+
+# ------------------------------------------------------------------------------
+# ANSI helpers (mirrors _swarm_colors but uses _swx_ prefix to avoid collision)
+# ------------------------------------------------------------------------------
+
+_swarmx_colors() {
+  _swx_green='\033[0;32m'
+  _swx_red='\033[0;31m'
+  _swx_cyan='\033[0;36m'
+  _swx_orange='\033[0;33m'
+  _swx_dim='\033[2m'
+  _swx_bold='\033[1m'
+  _swx_reset='\033[0m'
+}
+
+# ------------------------------------------------------------------------------
+# swarmx plan — dry-run planning
+# ------------------------------------------------------------------------------
+
+_swarmx_plan() {
+  local topology="${1:-}"
+  shift 2>/dev/null
+
+  [[ -z "$topology" ]] && {
+    echo "Usage: swarmx plan <topology> <n> <cmd>"
+    echo "Topologies: start, star, pipe, pair, wt, mixed"
+    return 1
+  }
+
+  _swarmx_colors
+
+  local count="" cmd="" name=""
+  local -a extra_args
+
+  # Parse remaining args (same pattern as swarm)
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; extra_args+=(--name "$2"); shift 2 ;;
+      --star) extra_args+=(--star); shift ;;
+      *)
+        if [[ -z "$count" && "$1" =~ ^[0-9]+$ ]]; then
+          count="$1"
+        elif [[ -z "$cmd" ]]; then
+          cmd="$1"
+        fi
+        shift ;;
+    esac
+  done
+
+  # Pair topology has no count
+  if [[ "$topology" == "pair" ]]; then
+    [[ -z "$cmd" ]] && { echo "Usage: swarmx plan pair <cmd>"; return 1; }
+    count=2
+  else
+    [[ -z "$count" || -z "$cmd" ]] && {
+      echo "Usage: swarmx plan $topology <n> <cmd>"
+      return 1
+    }
+  fi
+
+  # Plan output
+  echo ""
+  printf "  ${_swx_bold}${_swx_cyan}SWARM PLAN${_swx_reset}\n"
+  echo "  ─────────────────────────────────────────────────"
+
+  printf "  ${_swx_bold}Topology:${_swx_reset}  %s\n" "$topology"
+
+  case "$topology" in
+    star)
+      printf "  ${_swx_bold}Agents:${_swx_reset}    %s (1 conductor + %s workers)\n" "$count" "$((count - 1))"
+      ;;
+    pipe)
+      printf "  ${_swx_bold}Agents:${_swx_reset}    %s (%s pipeline stages)\n" "$count" "$count"
+      ;;
+    pair)
+      printf "  ${_swx_bold}Agents:${_swx_reset}    2 (1 coder + 1 reviewer)\n"
+      ;;
+    wt|worktree)
+      printf "  ${_swx_bold}Agents:${_swx_reset}    %s (worktree-isolated)\n" "$count"
+      ;;
+    *)
+      printf "  ${_swx_bold}Agents:${_swx_reset}    %s (flat workers)\n" "$count"
+      ;;
+  esac
+
+  printf "  ${_swx_bold}Command:${_swx_reset}   %s\n" "$cmd"
+  printf "  ${_swx_bold}Layout:${_swx_reset}    tiled\n"
+  [[ -n "$name" ]] && printf "  ${_swx_bold}Name:${_swx_reset}      %s\n" "$name"
+
+  # Worktree-specific info
+  if [[ "$topology" == "wt" || "$topology" == "worktree" ]]; then
+    local base_branch
+    base_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    local gen_name="${name:-wt-XXXXXXXX}"
+
+    printf "  ${_swx_bold}Base:${_swx_reset}      %s\n" "$base_branch"
+    printf "  ${_swx_bold}Branches:${_swx_reset}\n"
+    for ((i=1; i<=count; i++)); do
+      printf "    swarm/%s/agent-%s\n" "$gen_name" "$i"
+    done
+
+    # Estimate disk usage: get current repo size
+    local repo_root
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    if [[ -n "$repo_root" ]]; then
+      local repo_size
+      repo_size=$(du -sh "$repo_root" 2>/dev/null | awk '{print $1}')
+      printf "  ${_swx_bold}Est. disk:${_swx_reset} ~%s per worktree (%s total)\n" \
+        "$repo_size" "$count worktrees"
+    fi
+  fi
+
+  echo ""
+
+  # Confirmation
+  printf "  Proceed? [y/N] "
+  local answer
+  read -r answer
+  case "$answer" in
+    y|Y|yes|YES)
+      echo ""
+      swarm "$topology" "$count" "$cmd" "${extra_args[@]}"
+      ;;
+    *)
+      echo "  Cancelled."
+      return 0
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# swarmx status — enhanced status with git diff stats
+# ------------------------------------------------------------------------------
+
+_swarmx_status() {
+  local swarm_id
+  swarm_id=$(_swarm_current_id)
+  [[ -z "$swarm_id" ]] && { echo "swarmx status: no active swarm in this window."; return 1; }
+
+  local swarm_dir="$(_swarm_state_dir)/$swarm_id"
+  [[ -d "$swarm_dir" ]] || { echo "swarmx status: swarm '$swarm_id' not found."; return 1; }
+
+  _swarmx_colors
+
+  local swarm_name topology agent_count base_branch
+  swarm_name=$(jq -r '.name' "$swarm_dir/swarm.json")
+  topology=$(jq -r '.topology' "$swarm_dir/swarm.json")
+  agent_count=$(jq -r '.agents | length' "$swarm_dir/swarm.json")
+  base_branch=$(jq -r '.base_branch // empty' "$swarm_dir/swarm.json")
+
+  # Header
+  echo ""
+  printf "  ${_swx_bold}SWARM:${_swx_reset} %s ${_swx_dim}(%s topology, %s agents)${_swx_reset}\n" \
+    "$swarm_name" "$topology" "$agent_count"
+  echo "  ─────────────────────────────────────────────────────────────────────────────"
+
+  # Table header
+  printf "  ${_swx_bold}%-12s %-20s %6s  %-12s %-14s %s${_swx_reset}\n" \
+    "AGENT" "BRANCH" "FILES" "+/-" "LAST COMMIT" "PANE"
+
+  for agent_id in $(_swarm_agent_ids "$swarm_dir"); do
+    local pane_id branch wt_dir
+    pane_id=$(jq -r '.pane_id' "$swarm_dir/agents/$agent_id.json")
+    branch=$(jq -r '.branch // empty' "$swarm_dir/agents/$agent_id.json")
+    wt_dir=$(jq -r '.worktree // empty' "$swarm_dir/agents/$agent_id.json")
+
+    # Branch: use agent JSON branch, or try to detect from pane cwd
+    [[ -z "$branch" ]] && branch="--"
+
+    # Git diff stats
+    local files_changed="-" plus_minus="-"
+    if [[ -n "$base_branch" && "$branch" != "--" && "$branch" != "$base_branch" ]]; then
+      local stat_dir="${wt_dir:-$(jq -r '.working_dir' "$swarm_dir/swarm.json")}"
+      if [[ -d "$stat_dir" ]]; then
+        local merge_base stat_line
+        merge_base=$(cd "$stat_dir" && git merge-base HEAD "$base_branch" 2>/dev/null)
+        if [[ -n "$merge_base" ]]; then
+          stat_line=$(cd "$stat_dir" && git diff --stat "$merge_base..HEAD" 2>/dev/null | tail -1)
+          if [[ -n "$stat_line" ]]; then
+            files_changed=$(echo "$stat_line" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+')
+            local insertions deletions
+            insertions=$(echo "$stat_line" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')
+            deletions=$(echo "$stat_line" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+')
+            plus_minus="+${insertions:-0}/-${deletions:-0}"
+          fi
+        fi
+      fi
+    elif [[ -n "$branch" && "$branch" != "--" && -z "$base_branch" ]]; then
+      # Non-worktree swarm: try git stats for the branch if it exists
+      local repo_dir
+      repo_dir=$(jq -r '.working_dir' "$swarm_dir/swarm.json")
+      if [[ -d "$repo_dir" ]]; then
+        local merge_base stat_line
+        merge_base=$(cd "$repo_dir" && git merge-base HEAD "$branch" 2>/dev/null)
+        if [[ -n "$merge_base" ]]; then
+          stat_line=$(cd "$repo_dir" && git diff --stat "$merge_base..$branch" 2>/dev/null | tail -1)
+          if [[ -n "$stat_line" ]]; then
+            files_changed=$(echo "$stat_line" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+')
+            local insertions deletions
+            insertions=$(echo "$stat_line" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')
+            deletions=$(echo "$stat_line" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+')
+            plus_minus="+${insertions:-0}/-${deletions:-0}"
+          fi
+        fi
+      fi
+    fi
+
+    # Last commit time
+    local last_commit="-"
+    if [[ -n "$branch" && "$branch" != "--" ]]; then
+      local check_dir="${wt_dir:-$(jq -r '.working_dir' "$swarm_dir/swarm.json")}"
+      if [[ -d "$check_dir" ]]; then
+        last_commit=$(cd "$check_dir" && git log -1 --format='%ar' "$branch" 2>/dev/null || echo "-")
+      fi
+    fi
+
+    # Pane status
+    local pane_status
+    if tmux display-message -p -t "$pane_id" '#{pane_id}' &>/dev/null; then
+      local current_cmd
+      current_cmd=$(tmux display-message -p -t "$pane_id" '#{pane_current_command}' 2>/dev/null)
+      pane_status="${_swx_green}active${_swx_reset} (${current_cmd:-?})"
+    else
+      pane_status="${_swx_red}dead${_swx_reset} ✗"
+    fi
+
+    # Print row
+    printf "  %-12s %-20s %6s  %-12s %-14s %b\n" \
+      "$agent_id" "$branch" "$files_changed" "$plus_minus" "$last_commit" "$pane_status"
+  done
+
+  echo ""
+}
+
+# ------------------------------------------------------------------------------
+# swarmx merge — interactive fzf merge workflow
+# ------------------------------------------------------------------------------
+
+_swarmx_merge() {
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarmx merge: no active swarm."; return 1; }
+
+  local base_branch
+  base_branch=$(jq -r '.base_branch // empty' "$swarm_dir/swarm.json")
+  [[ -z "$base_branch" ]] && { echo "swarmx merge: not a worktree swarm (no base_branch)."; return 1; }
+
+  local repo_root
+  repo_root=$(jq -r '.working_dir' "$swarm_dir/swarm.json")
+
+  _swarmx_colors
+
+  # Collect mergeable agents
+  local -a merge_lines
+  for agent_id in $(_swarm_agent_ids "$swarm_dir"); do
+    local branch wt_dir
+    branch=$(jq -r '.branch // empty' "$swarm_dir/agents/$agent_id.json")
+    wt_dir=$(jq -r '.worktree // empty' "$swarm_dir/agents/$agent_id.json")
+    [[ -z "$branch" || "$branch" == "$base_branch" ]] && continue
+
+    local stat_dir="${wt_dir:-$repo_root}"
+    local files_changed="0" plus_minus="+0/-0" conflict_status="clean"
+
+    if [[ -d "$stat_dir" ]]; then
+      local merge_base stat_line
+      merge_base=$(cd "$stat_dir" && git merge-base HEAD "$base_branch" 2>/dev/null)
+      if [[ -n "$merge_base" ]]; then
+        stat_line=$(cd "$stat_dir" && git diff --stat "$merge_base..HEAD" 2>/dev/null | tail -1)
+        if [[ -n "$stat_line" ]]; then
+          files_changed=$(echo "$stat_line" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+')
+          local ins del
+          ins=$(echo "$stat_line" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')
+          del=$(echo "$stat_line" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+')
+          plus_minus="+${ins:-0}/-${del:-0}"
+        fi
+      fi
+
+      # Check for conflicts via merge-tree (git 2.38+)
+      if command -v git &>/dev/null; then
+        local merge_result
+        merge_result=$(cd "$repo_root" && git merge-tree --write-tree "$base_branch" "$branch" 2>&1) || true
+        if echo "$merge_result" | grep -q "CONFLICT"; then
+          conflict_status="CONFLICT"
+        fi
+      fi
+    fi
+
+    merge_lines+=("$(printf "%s\t%s\t%s\t%s\t%s\t%s" \
+      "$branch" "${files_changed:-0}" "$plus_minus" "$conflict_status" "$agent_id" "$stat_dir")")
+  done
+
+  if (( ${#merge_lines[@]} == 0 )); then
+    echo "swarmx merge: no agent branches to merge."
+    return 0
+  fi
+
+  # Present in fzf
+  local selected
+  selected=$(printf '%s\n' "${merge_lines[@]}" | \
+    fzf --tmux 80%,70% \
+      --multi \
+      --delimiter $'\t' \
+      --header "tab: select  enter: merge selected  ctrl-p: create PR instead" \
+      --with-nth 1,2,3,4 \
+      --preview "cd $repo_root && echo '--- diff stat ---' && git diff --stat ${base_branch}..{1} 2>/dev/null && echo '' && echo '--- log ---' && git log --oneline ${base_branch}..{1} 2>/dev/null" \
+      --preview-window "right:55%" \
+      --expect "ctrl-p" \
+  ) || return 0
+
+  [[ -z "$selected" ]] && return 0
+
+  # Parse fzf output: first line is the key pressed, rest are selections
+  local key
+  key=$(echo "$selected" | head -1)
+  local selections
+  selections=$(echo "$selected" | tail -n +2)
+
+  [[ -z "$selections" ]] && return 0
+
+  if [[ "$key" == "ctrl-p" ]]; then
+    # Create PRs for selected branches
+    while IFS=$'\t' read -r branch files pm conflict aid stat_dir; do
+      [[ -z "$branch" ]] && continue
+      echo ""
+      printf "  Creating PR for ${_swx_cyan}%s${_swx_reset}...\n" "$branch"
+      (cd "$repo_root" && git push origin "$branch" 2>/dev/null)
+      (cd "$repo_root" && gh pr create --head "$branch" --base "$base_branch" \
+        --title "Merge $branch into $base_branch" \
+        --body "Swarm agent branch merge.
+
+Files changed: $files
+Changes: $pm")
+    done <<< "$selections"
+  else
+    # Merge selected branches
+    (cd "$repo_root" && git checkout "$base_branch" 2>/dev/null)
+
+    while IFS=$'\t' read -r branch files pm conflict aid stat_dir; do
+      [[ -z "$branch" ]] && continue
+      echo ""
+      printf "  Merging ${_swx_cyan}%s${_swx_reset}...\n" "$branch"
+
+      local merge_output
+      merge_output=$(cd "$repo_root" && git merge --no-ff "$branch" -m "Merge $branch" 2>&1)
+      local rc=$?
+
+      if (( rc == 0 )); then
+        printf "  ${_swx_green}Merged successfully.${_swx_reset}\n"
+      else
+        printf "  ${_swx_red}Merge failed:${_swx_reset}\n"
+        echo "$merge_output" | head -10 | sed 's/^/    /'
+        printf "  Run ${_swx_dim}git merge --abort${_swx_reset} to undo, or resolve conflicts.\n"
+        break
+      fi
+    done <<< "$selections"
+  fi
+
+  echo ""
+}
+
+# ------------------------------------------------------------------------------
+# Usage
+# ------------------------------------------------------------------------------
+
+_swarmx_usage() {
+  cat <<'EOF'
+
+  swarmx — extended swarm commands
+
+  USAGE
+    swarmx plan <topology> <n> <cmd>   Dry-run: show what a swarm launch would do
+    swarmx status                      Enhanced status with git stats per agent
+    swarmx merge                       Interactive fzf merge workflow for agent branches
+
+  ALIASES
+    swarmx st                          Alias for status
+
+  EXAMPLES
+    swarmx plan star 4 cx              Preview a 4-agent star swarm
+    swarmx plan wt 3 cx                Preview worktree swarm with disk estimates
+    swarmx status                      Show agent branches, diffs, pane status
+    swarmx merge                       Pick branches to merge or create PRs
+
+EOF
+}
+
+# ------------------------------------------------------------------------------
+# Dispatcher
+# ------------------------------------------------------------------------------
+
+swarmx() {
+  case "${1:-}" in
+    plan)       shift; _swarmx_plan "$@" ;;
+    status|st)  _swarmx_status ;;
+    merge)      _swarmx_merge ;;
+    help|"")    _swarmx_usage ;;
+    *)          echo "Unknown command: $1"; _swarmx_usage; return 1 ;;
+  esac
+}
