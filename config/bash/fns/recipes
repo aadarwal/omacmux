@@ -10,6 +10,7 @@
 #   recipe save <name>     Save current swarm as a recipe
 #   recipe edit <name>     Edit a user recipe
 #   recipe delete <name>   Delete a user recipe
+#   recipe compose "desc"  AI-generate a recipe from natural language
 #   recipe <name> [args]   Run a recipe
 
 # Stub guards for voice helpers
@@ -197,6 +198,131 @@ _recipe_edit() {
   ${EDITOR:-nvim} "$recipe_file"
 }
 
+_recipe_compose() {
+  local description="${*:?Usage: recipe compose \"description of what the recipe should do\"}"
+
+  # Check that claude CLI is available
+  if ! command -v claude &>/dev/null; then
+    echo -e "\033[31mClaude CLI not found. Install it to use recipe compose.\033[0m"
+    return 1
+  fi
+
+  mkdir -p "$_recipe_dir"
+
+  # Ask user for a recipe name
+  local name=""
+  read -rp "Recipe name (short, no spaces): " name
+  name="${name// /-}"
+  name="${name,,}"  # lowercase
+  if [[ -z "$name" ]]; then
+    echo -e "\033[31mNo name provided. Cancelled.\033[0m"
+    return 1
+  fi
+
+  # Check if recipe already exists
+  if [[ -f "$_recipe_dir/$name.sh" ]]; then
+    read -rp "Recipe '$name' already exists. Overwrite? [y/N] " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled."; return 0; }
+  fi
+
+  _voice_say "Composing recipe $name"
+
+  local prompt
+  prompt="Generate a bash recipe file for omacmux (a tmux-based agent IDE).
+
+User request: $description
+
+The file must follow this exact format — output ONLY the script, no markdown fences:
+
+#!/usr/bin/env bash
+# Recipe: <name>
+# Description: <one-line description>
+# Created: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+recipe_main() {
+  # recipe body here
+}
+
+Available swarm topologies (use via the 'swarm' command):
+- swarm star <n> <cmd>   — conductor + n worker agents
+- swarm wt <n> <cmd>     — one agent per git worktree (isolated branches)
+- swarm pipe <n> <cmd>   — sequential pipeline stages
+- swarm pair <cmd>        — coder + reviewer feedback loop
+- swarm flat <n> <cmd>   — flat topology, all peers
+- swarm mesh <n> <cmd>   — fully connected mesh
+
+Available agent commands (last arg to swarm):
+- cx    — Claude with basic permissions
+- cxx   — Claude with full YOLO permissions
+- claude — plain Claude
+- c     — Claude compact mode
+- cdx   — Claude with dangerously skip permissions
+- cdxx  — Claude with full dangerous YOLO
+
+Other available commands inside recipes:
+- swarm send agent-N \"message\"  — send a message to a specific agent
+- swarm broadcast \"message\"     — message all agents
+- sleep N                        — wait N seconds (use between swarm launch and messaging)
+
+Example built-in recipes for reference:
+
+_recipe_builtin_research() {
+  local topic=\"\${*:-general research}\"
+  _voice_say \"Starting research on \$topic\"
+  swarm star 4 cxx
+  sleep 2
+  swarm send agent-1 \"Research the following topic thoroughly: \$topic\"
+}
+
+_recipe_builtin_build() {
+  local feature=\"\${*:-feature}\"
+  _voice_say \"Starting build for \$feature\"
+  swarm wt 3 cxx
+  sleep 2
+  swarm broadcast \"Build the following feature: \$feature\"
+}
+
+_recipe_builtin_fix() {
+  local issue=\"\${*:-bug}\"
+  _voice_say \"Starting fix for \$issue\"
+  swarm pair cxx
+  sleep 2
+  swarm send agent-1 \"Debug and fix: \$issue\"
+}
+
+recipe_main() receives the user's arguments as \$@ — use them to parameterize the recipe.
+Pick the topology and agent count that best fits the user's description.
+Include _voice_say calls for status updates.
+Output ONLY the bash script, nothing else."
+
+  local generated rc
+  generated=$(claude --print -p "$prompt" 2>&1)
+  rc=$?
+
+  if [[ $rc -ne 0 || -z "$generated" ]]; then
+    echo -e "\033[31mFailed to generate recipe.\033[0m"
+    return 1
+  fi
+
+  # Strip markdown fences if Claude wrapped the output
+  generated=$(echo "$generated" | sed '/^```\(bash\)\{0,1\}$/d')
+
+  echo "$generated" > "$_recipe_dir/$name.sh"
+  chmod +x "$_recipe_dir/$name.sh"
+
+  echo -e "\033[32mRecipe '$name' saved to $_recipe_dir/$name.sh\033[0m"
+  echo ""
+  echo -e "\033[1mGenerated recipe:\033[0m"
+  cat "$_recipe_dir/$name.sh"
+  echo ""
+
+  _voice_say "Recipe composed: $name"
+
+  read -rp "Run it now? [y/N] " run_now
+  if [[ "$run_now" =~ ^[Yy]$ ]]; then
+    recipe "$name"
+  fi
+}
+
 _recipe_delete() {
   local name="${1:?Usage: recipe delete <name>}"
   local recipe_file="$_recipe_dir/$name.sh"
@@ -223,6 +349,7 @@ recipe() {
     save)      shift; _recipe_save "$@" ;;
     edit)      shift; _recipe_edit "$@" ;;
     delete|rm) shift; _recipe_delete "$@" ;;
+    compose)   shift; _recipe_compose "$@" ;;
     "")        _recipe_list ;;
     *)         _recipe_run "$@" ;;
   esac
