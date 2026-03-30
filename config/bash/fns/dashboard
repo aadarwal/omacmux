@@ -1,0 +1,241 @@
+# ==============================================================================
+# Project Dashboard
+# ==============================================================================
+
+# Internal: get default branch name
+_pd_default_branch() {
+  git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@'
+}
+
+# Internal: get worktree paths as associative array (branch -> path)
+_pd_worktree_map() {
+  git worktree list --porcelain 2>/dev/null | awk '
+    /^worktree /{path=$2}
+    /^branch refs\/heads\//{print substr($2,17) "\t" path}
+  '
+}
+
+# Internal: get swarm info (name, topology, agent_count) if any active
+_pd_swarm_info() {
+  local state_dir="$HOME/.local/share/omacmux/swarms"
+  [[ -d "$state_dir" ]] || return
+  for swarm_file in "$state_dir"/*/swarm.json; do
+    [[ -f "$swarm_file" ]] || continue
+    local info
+    info=$(jq -r '[.name, .topology, (.agents | length | tostring)] | join("\t")' "$swarm_file" 2>/dev/null) || continue
+    printf '%s\n' "$info"
+  done
+}
+
+# Internal: render ANSI-colored dashboard for sidebar
+_pd_render() {
+  local reset='\033[0m'
+  local bold='\033[1m'
+  local dim='\033[2m'
+  local orange='\033[0;33m'
+  local cyan='\033[0;36m'
+
+  local repo_root repo_name current_branch default_branch
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "Not in a git repo."; return 1; }
+  repo_name=$(basename "$repo_root")
+  current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD)
+  default_branch=$(_pd_default_branch)
+  [[ -z "$default_branch" ]] && default_branch="main"
+
+  # Header
+  printf "${bold}PROJECT DASHBOARD${reset}\n"
+  printf "${dim}─────────────────────────${reset}\n"
+  printf "${bold}%s${reset} ${dim}on${reset} ${orange}%s${reset}\n\n" "$repo_name" "$current_branch"
+
+  # Build worktree map
+  local -A wt_map
+  while IFS=$'\t' read -r branch path; do
+    [[ -n "$branch" ]] && wt_map["$branch"]="$path"
+  done < <(_pd_worktree_map)
+
+  # Branches
+  printf "${bold}BRANCHES${reset}\n"
+  while IFS= read -r line; do
+    local branch
+    branch=$(echo "$line" | awk '{print $1}')
+
+    # Ahead/behind
+    local ahead=0 behind=0
+    if git rev-parse --verify "origin/$default_branch" &>/dev/null && git rev-parse --verify "$branch" &>/dev/null; then
+      local counts
+      counts=$(git rev-list --left-right --count "origin/$default_branch...$branch" 2>/dev/null)
+      behind=$(echo "$counts" | awk '{print $1}')
+      ahead=$(echo "$counts" | awk '{print $2}')
+    fi
+
+    local arrows=""
+    (( ahead > 0 )) && arrows+="⇡${ahead}"
+    (( behind > 0 )) && arrows+=" ⇣${behind}"
+
+    local color="$dim"
+    local indicator=""
+    [[ -n "${wt_map[$branch]}" ]] && { color="$cyan"; indicator=" [wt]"; }
+    [[ "$branch" == "$current_branch" ]] && color="$orange"
+
+    printf "  ${color}%-20s${reset} ${dim}%s${reset}" "$branch" "$arrows"
+    [[ -n "$indicator" ]] && printf " ${cyan}%s${reset}" "$indicator"
+    printf "\n"
+  done < <(git branch --sort=-committerdate --format='%(refname:short) %(committerdate:relative) %(subject)' | head -20)
+
+  # Worktrees
+  printf "\n${bold}WORKTREES${reset}\n"
+  while IFS= read -r line; do
+    local wt_path wt_branch
+    wt_path=$(echo "$line" | awk '{print $1}')
+    wt_branch=$(echo "$line" | sed 's/.*\[\(.*\)\]/\1/' | sed 's/].*//')
+    local dirty_count
+    dirty_count=$(git -C "$wt_path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    local dirty_indicator=""
+    (( dirty_count > 0 )) && dirty_indicator=" ${orange}●${dirty_count}${reset}"
+    printf "  ${cyan}%-30s${reset} ${dim}%s${reset}%b\n" "$wt_path" "$wt_branch" "$dirty_indicator"
+  done < <(git worktree list 2>/dev/null | grep -v '(bare)')
+
+  # Swarms
+  local swarm_info
+  swarm_info=$(_pd_swarm_info)
+  if [[ -n "$swarm_info" ]]; then
+    printf "\n${bold}SWARMS${reset}\n"
+    while IFS=$'\t' read -r name topology count; do
+      printf "  ${orange}%s${reset} ${dim}%s${reset} ${dim}(%s agents)${reset}\n" "$name" "$topology" "$count"
+    done <<< "$swarm_info"
+  fi
+
+  printf "\n"
+}
+
+# Full-screen project dashboard popup (fzf-powered)
+# Usage: pd
+pd() {
+  git rev-parse --show-toplevel &>/dev/null || { echo "Not in a git repo."; return 1; }
+
+  local default_branch
+  default_branch=$(_pd_default_branch)
+  [[ -z "$default_branch" ]] && default_branch="main"
+
+  # Build worktree map
+  local -A wt_map
+  while IFS=$'\t' read -r branch path; do
+    [[ -n "$branch" ]] && wt_map["$branch"]="$path"
+  done < <(_pd_worktree_map)
+
+  # Build swarm agent map (branch -> swarm name)
+  local -A agent_map
+  local state_dir="$HOME/.local/share/omacmux/swarms"
+  if [[ -d "$state_dir" ]]; then
+    for swarm_file in "$state_dir"/*/swarm.json; do
+      [[ -f "$swarm_file" ]] || continue
+      local swarm_name swarm_dir
+      swarm_name=$(jq -r '.name' "$swarm_file" 2>/dev/null)
+      swarm_dir=$(dirname "$swarm_file")
+      for agent_file in "$swarm_dir/agents/"*.json; do
+        [[ -f "$agent_file" ]] || continue
+        local wt_branch
+        wt_branch=$(jq -r '.worktree_branch // empty' "$agent_file" 2>/dev/null)
+        [[ -n "$wt_branch" ]] && agent_map["$wt_branch"]="$swarm_name"
+      done
+    done
+  fi
+
+  local current_branch
+  current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD)
+
+  # Collect entries for fzf
+  local entries=""
+
+  # [BRANCHES] section
+  entries+="[BRANCHES]"$'\n'
+  while IFS= read -r line; do
+    local branch rel_and_subject
+    branch=$(echo "$line" | awk '{print $1}')
+    rel_and_subject=$(echo "$line" | cut -d' ' -f2-)
+
+    # Ahead/behind
+    local ahead=0 behind=0
+    if git rev-parse --verify "origin/$default_branch" &>/dev/null && git rev-parse --verify "$branch" &>/dev/null; then
+      local counts
+      counts=$(git rev-list --left-right --count "origin/$default_branch...$branch" 2>/dev/null)
+      behind=$(echo "$counts" | awk '{print $1}')
+      ahead=$(echo "$counts" | awk '{print $2}')
+    fi
+
+    local arrows=""
+    (( ahead > 0 )) && arrows+="⇡${ahead}"
+    (( behind > 0 )) && arrows+="⇣${behind}"
+
+    local indicators=""
+    [[ -n "${wt_map[$branch]}" ]] && indicators+=" [wt]"
+    [[ -n "${agent_map[$branch]}" ]] && indicators+=" [agent:${agent_map[$branch]}]"
+    [[ "$branch" == "$current_branch" ]] && indicators+=" *"
+
+    entries+="  $branch  $arrows  $rel_and_subject$indicators"$'\n'
+  done < <(git branch --sort=-committerdate --format='%(refname:short) %(committerdate:relative) %(subject)' | head -30)
+
+  # [WORKTREES] section
+  entries+="[WORKTREES]"$'\n'
+  while IFS= read -r line; do
+    local wt_path wt_branch
+    wt_path=$(echo "$line" | awk '{print $1}')
+    wt_branch=$(echo "$line" | sed 's/.*\[\(.*\)\]/\1/' | sed 's/].*//')
+    local dirty_count
+    dirty_count=$(git -C "$wt_path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    local dirty=""
+    (( dirty_count > 0 )) && dirty=" ●${dirty_count}"
+    entries+="  $wt_path  [$wt_branch]$dirty"$'\n'
+  done < <(git worktree list 2>/dev/null | grep -v '(bare)')
+
+  # [SWARMS] section
+  local swarm_info
+  swarm_info=$(_pd_swarm_info)
+  if [[ -n "$swarm_info" ]]; then
+    entries+="[SWARMS]"$'\n'
+    while IFS=$'\t' read -r name topology count; do
+      entries+="  $name  $topology  ${count} agents"$'\n'
+    done <<< "$swarm_info"
+  fi
+
+  local selected
+  selected=$(echo "$entries" \
+    | fzf --ansi --tmux 80%,70% \
+      --header "enter: checkout  ctrl-w: worktree  ctrl-a: agent" \
+      --preview 'branch=$(echo {} | awk "{print \$1}"); [[ "$branch" == \[* ]] && exit 0; git log --oneline --graph --color=always -20 "$branch" 2>/dev/null || echo "No log for $branch"' \
+      --preview-window "right:50%" \
+      --bind "ctrl-w:execute(branch=\$(echo {} | awk '{print \$1}'); [[ \"\$branch\" == \\[* ]] && exit 0; type gwa &>/dev/null && gwa \"\$branch\" || git worktree add \"../\$(basename \$(git rev-parse --show-toplevel))-\${branch//\\//-}\" \"\$branch\" 2>/dev/null)+abort" \
+      --bind "ctrl-a:execute(branch=\$(echo {} | awk '{print \$1}'); [[ \"\$branch\" == \\[* ]] && exit 0; tmux split-window -h -c \"#{pane_current_path}\" \"claude\")+abort" \
+    ) || return 0
+
+  # Extract branch name from selection
+  local branch
+  branch=$(echo "$selected" | awk '{print $1}')
+
+  # Skip section headers
+  [[ "$branch" == \[* ]] && return 0
+
+  git checkout "$branch" 2>/dev/null
+}
+
+# Persistent sidebar dashboard (toggle)
+# Usage: pds
+pds() {
+  git rev-parse --show-toplevel &>/dev/null || { echo "Not in a git repo."; return 1; }
+  [[ -z "$TMUX" ]] && { echo "Not in tmux."; return 1; }
+
+  local pane_id
+  pane_id=$(tmux show-option -wqv @dashboard_pane 2>/dev/null)
+
+  if [[ -n "$pane_id" ]] && tmux has-session -t "$pane_id" 2>/dev/null; then
+    tmux kill-pane -t "$pane_id"
+    tmux set-option -wu @dashboard_pane
+    return 0
+  fi
+
+  # Open sidebar: split right, 30 columns
+  local new_pane
+  new_pane=$(tmux split-window -h -l 30 -d -P -F '#{pane_id}' \
+    "watch -n 5 -c bash -c '_pd_render'")
+  tmux set-option -w @dashboard_pane "$new_pane"
+}
