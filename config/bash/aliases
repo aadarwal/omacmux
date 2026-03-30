@@ -31,6 +31,8 @@ alias ....='cd ../../..'
 alias c='opencode'
 alias cx='printf "\033[2J\033[3J\033[H" && claude --allow-dangerously-skip-permissions'
 alias cxx='printf "\033[2J\033[3J\033[H" && claude --dangerously-skip-permissions'
+alias cdx='printf "\033[2J\033[3J\033[H" && codex'
+alias cdxx='printf "\033[2J\033[3J\033[H" && codex --full-auto'
 alias d='docker'
 alias r='rails'
 unalias t 2>/dev/null

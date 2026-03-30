@@ -13,12 +13,23 @@ _t_attach() {
   tmux attach-session -t "=$link"
 }
 
+# Use the invoking client's PID when available so linked sessions stay bound
+# to the terminal that requested the switch.
+_t_client_pid() {
+  local cpid="${1:-}"
+  if [[ -n $cpid ]]; then
+    printf '%s\n' "$cpid"
+    return
+  fi
+  tmux display-message -p '#{client_pid}'
+}
+
 # Switch client inside tmux using a linked session group.
 # Uses the tmux client PID so each terminal window gets a stable suffix.
 _t_switch() {
   local name="$1"
-  local cpid
-  cpid=$(tmux display-message -p '#{client_pid}')
+  local cpid="${2-}"
+  cpid=$(_t_client_pid "$cpid")
   local link="${name}~${cpid}"
   if ! tmux has-session -t "=$link" 2>/dev/null; then
     tmux new-session -d -t "=$name" -s "$link"
@@ -29,8 +40,11 @@ _t_switch() {
 
 # Switch to the next base session (wraps around)
 _t_switch_next() {
-  local current
-  current=$(tmux display-message -p '#S')
+  local current="${1:-}"
+  local cpid="${2:-}"
+  if [[ -z $current ]]; then
+    current=$(tmux display-message -p '#S')
+  fi
   current="${current%%~*}"
 
   local -a sessions
@@ -43,13 +57,16 @@ _t_switch_next() {
   for ((i=0; i<count; i++)); do
     [[ ${sessions[$i]} == "$current" ]] && { idx=$i; break; }
   done
-  _t_switch "${sessions[$(( (idx + 1) % count ))]}"
+  _t_switch "${sessions[$(( (idx + 1) % count ))]}" "$cpid"
 }
 
 # Switch to the previous base session (wraps around)
 _t_switch_prev() {
-  local current
-  current=$(tmux display-message -p '#S')
+  local current="${1:-}"
+  local cpid="${2:-}"
+  if [[ -z $current ]]; then
+    current=$(tmux display-message -p '#S')
+  fi
   current="${current%%~*}"
 
   local -a sessions
@@ -62,7 +79,7 @@ _t_switch_prev() {
   for ((i=0; i<count; i++)); do
     [[ ${sessions[$i]} == "$current" ]] && { idx=$i; break; }
   done
-  _t_switch "${sessions[$(( (idx - 1 + count) % count ))]}"
+  _t_switch "${sessions[$(( (idx - 1 + count) % count ))]}" "$cpid"
 }
 
 # Smart tmux entry point

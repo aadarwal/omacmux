@@ -121,6 +121,7 @@ _swarm_topo_icon() {
     pair) echo "⇄" ;;
     mesh) echo "◆" ;;
     mixed) echo "⊞" ;;
+    worktree|wt-star) echo "⌥" ;;
     *)    echo "·" ;;
   esac
 }
@@ -535,17 +536,28 @@ _swarm_kill() {
   local name
   name=$(jq -r '.name // "unknown"' "$swarm_dir/swarm.json" 2>/dev/null)
 
-  # Kill agent panes (skip current pane)
+  # Kill agent panes and clean up worktrees
   for agent_file in "$swarm_dir/agents/"*.json; do
     [[ -f "$agent_file" ]] || continue
-    local device pane_id
+    local device pane_id wt_dir wt_branch
     device=$(jq -r '.device' "$agent_file")
     pane_id=$(jq -r '.pane_id' "$agent_file")
+    wt_dir=$(jq -r '.worktree // empty' "$agent_file")
+    wt_branch=$(jq -r '.branch // empty' "$agent_file")
 
+    # Kill pane
     if [[ "$device" == "local" ]]; then
       [[ "$pane_id" != "$TMUX_PANE" ]] && tmux kill-pane -t "$pane_id" 2>/dev/null
     else
       tailscale ssh "$device" -- tmux kill-pane -t "$pane_id" 2>/dev/null
+    fi
+
+    # Clean up worktree if it exists and isn't the main repo
+    local main_dir
+    main_dir=$(jq -r '.working_dir // empty' "$swarm_dir/swarm.json")
+    if [[ -n "$wt_dir" && -d "$wt_dir" && "$wt_dir" != "$main_dir" ]]; then
+      git worktree remove "$wt_dir" --force 2>/dev/null
+      [[ -n "$wt_branch" ]] && git branch -D "$wt_branch" 2>/dev/null
     fi
   done
 
@@ -838,10 +850,20 @@ _swarm_status_by_id() {
   _swarm_topology "$swarm_dir"
   echo ""
 
-  # Agent table
+  # Agent table -- detect if this is a worktree swarm
+  local has_worktrees=false
+  local base_branch
+  base_branch=$(jq -r '.base_branch // empty' "$swarm_dir/swarm.json")
+  [[ -n "$base_branch" ]] && has_worktrees=true
+
   printf "  ${_sw_bold}AGENTS${_sw_reset}\n"
-  printf "  ${_sw_bold}%-12s %-12s %-10s %-8s %s${_sw_reset}\n" \
-    "AGENT" "ROLE" "DEVICE" "PANE" "MSGS"
+  if $has_worktrees; then
+    printf "  ${_sw_bold}%-12s %-12s %-28s %s${_sw_reset}\n" \
+      "AGENT" "ROLE" "BRANCH" "DIFF"
+  else
+    printf "  ${_sw_bold}%-12s %-12s %-10s %-8s %s${_sw_reset}\n" \
+      "AGENT" "ROLE" "DEVICE" "PANE" "MSGS"
+  fi
 
   for agent_id in $(_swarm_agent_ids "$swarm_dir"); do
     local role device pane_id msg_count indicator
@@ -856,8 +878,21 @@ _swarm_status_by_id() {
       indicator="${_sw_dim}○${_sw_reset}"
     fi
 
-    printf "  ${indicator} %-12s %-12s %-10s %-8s %s\n" \
-      "$agent_id" "$role" "$device" "$pane_id" "$msg_count"
+    if $has_worktrees; then
+      local branch wt_dir diff_stat=""
+      branch=$(jq -r '.branch // "--"' "$swarm_dir/agents/$agent_id.json")
+      wt_dir=$(jq -r '.worktree // empty' "$swarm_dir/agents/$agent_id.json")
+      if [[ -n "$wt_dir" && -d "$wt_dir" && "$branch" != "$base_branch" ]]; then
+        local files_changed
+        files_changed=$(cd "$wt_dir" && git diff --stat "$base_branch" 2>/dev/null | tail -1 | sed 's/^ *//')
+        [[ -n "$files_changed" ]] && diff_stat="$files_changed"
+      fi
+      printf "  ${indicator} %-12s %-12s %-28s %s\n" \
+        "$agent_id" "$role" "$branch" "${diff_stat:---}"
+    else
+      printf "  ${indicator} %-12s %-12s %-10s %-8s %s\n" \
+        "$agent_id" "$role" "$device" "$pane_id" "$msg_count"
+    fi
   done
   echo ""
 
@@ -1275,6 +1310,387 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
+# Worktree-isolated swarms
+# ------------------------------------------------------------------------------
+
+# Create a swarm where each agent gets its own git worktree and branch
+# Usage: swarm wt <count> <cmd> [--name NAME] [--star]
+#   or:  swarm wt <cmd> <branch1> <branch2> ... [--name NAME] [--star]
+_swarm_wt() {
+  local count="" cmd="" name="" star=false
+  local -a branches
+
+  # Parse args
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      --star) star=true; shift ;;
+      *)
+        if [[ -z "$cmd" && "$1" =~ ^[0-9]+$ && $# -ge 2 ]]; then
+          # count + cmd mode
+          count="$1"; cmd="$2"; shift 2
+        elif [[ -z "$cmd" ]]; then
+          cmd="$1"; shift
+        else
+          # remaining args are branch names
+          branches+=("$1"); shift
+        fi
+        ;;
+    esac
+  done
+
+  [[ -z "$cmd" ]] && { echo "Usage: swarm wt <count> <cmd> [--name NAME] [--star]"; echo "   or: swarm wt <cmd> <branch1> <branch2> ..."; return 1; }
+  [[ -z $TMUX ]] && { echo "swarm wt requires tmux."; return 1; }
+
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "swarm wt: not in a git repo."; return 1; }
+
+  local base_branch
+  base_branch=$(git rev-parse --abbrev-ref HEAD)
+
+  # Determine agent count and branch names
+  if (( ${#branches[@]} > 0 )); then
+    count=${#branches[@]}
+  else
+    [[ -z "$count" ]] && { echo "swarm wt: provide a count or branch names."; return 1; }
+    [[ -z "$name" ]] && name="wt-$(_swarm_gen_id)"
+    for ((i=1; i<=count; i++)); do
+      branches+=("swarm/$name/agent-$i")
+    done
+  fi
+
+  local swarm_id
+  swarm_id=$(_swarm_gen_id)
+  local swarm_dir="$(_swarm_state_dir)/$swarm_id"
+  [[ -z "$name" ]] && name="wt-$swarm_id"
+
+  mkdir -p "$swarm_dir"/{agents,mailbox/shared,results}
+
+  local current_dir="$PWD"
+  local -a panes worktree_dirs
+  tmux rename-window -t "$TMUX_PANE" "$name"
+
+  # Create panes and worktrees
+  local pane_map="" wt_pane_map=""
+  local start_idx=0
+
+  # In star mode, first agent (conductor) stays in main repo
+  if $star; then
+    panes+=("$TMUX_PANE")
+    worktree_dirs+=("$repo_root")
+
+    local agent_id="agent-1"
+    mkdir -p "$swarm_dir/mailbox/$agent_id"
+    cat > "$swarm_dir/agents/$agent_id.json" <<EOF
+{
+  "id": "$agent_id",
+  "pane_id": "$TMUX_PANE",
+  "role": "conductor",
+  "command": "$cmd",
+  "device": "local",
+  "remote_pane": null,
+  "status": "active",
+  "worktree": "$repo_root",
+  "branch": "$base_branch",
+  "started": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+    pane_map="$TMUX_PANE:agent-1"
+    wt_pane_map="$TMUX_PANE:$repo_root"
+    start_idx=1
+  fi
+
+  for ((i=start_idx; i<count; i++)); do
+    local branch="${branches[$i]}"
+    local agent_id="agent-$((i+1))"
+    local branch_slug="${branch//\//-}"
+    local repo_name
+    repo_name=$(basename "$repo_root")
+    local wt_dir="$(dirname "$repo_root")/${repo_name}-${branch_slug}"
+
+    # Create worktree
+    if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+      git worktree add "$wt_dir" "$branch" 2>/dev/null
+    else
+      git worktree add -b "$branch" "$wt_dir" "$base_branch" 2>/dev/null
+    fi
+
+    if [[ ! -d "$wt_dir" ]]; then
+      echo "swarm wt: failed to create worktree for $branch"
+      continue
+    fi
+
+    worktree_dirs+=("$wt_dir")
+
+    # Create pane (always split -- never steal user's pane)
+    local pane_id
+    local split_target="${panes[-1]:-$TMUX_PANE}"
+    pane_id=$(tmux split-window -h -t "$split_target" -c "$wt_dir" -P -F '#{pane_id}')
+    panes+=("$pane_id")
+    tmux select-layout -t "${panes[0]:-$TMUX_PANE}" tiled
+
+    # Register agent
+    local role="worker"
+    mkdir -p "$swarm_dir/mailbox/$agent_id"
+    cat > "$swarm_dir/agents/$agent_id.json" <<EOF
+{
+  "id": "$agent_id",
+  "pane_id": "$pane_id",
+  "role": "$role",
+  "command": "$cmd",
+  "device": "local",
+  "remote_pane": null,
+  "status": "active",
+  "worktree": "$wt_dir",
+  "branch": "$branch",
+  "started": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
+    [[ -n "$pane_map" ]] && pane_map+=","
+    pane_map+="$pane_id:$agent_id"
+    [[ -n "$wt_pane_map" ]] && wt_pane_map+=","
+    wt_pane_map+="$pane_id:$wt_dir"
+  done
+
+  # Write swarm metadata
+  local window_id session topology="worktree"
+  window_id=$(tmux display-message -p '#{window_id}')
+  session=$(tmux display-message -p '#{session_name}')
+  $star && topology="wt-star"
+
+  local total=${#panes[@]}
+  cat > "$swarm_dir/swarm.json" <<EOF
+{
+  "id": "$swarm_id",
+  "name": "$name",
+  "topology": "$topology",
+  "hub": "local",
+  "status": "running",
+  "conductor": $($star && echo '"agent-1"' || echo 'null'),
+  "working_dir": "$repo_root",
+  "base_branch": "$base_branch",
+  "window_id": "$window_id",
+  "session": "$session",
+  "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "agents": [$(printf '"%s",' $(seq -f 'agent-%.0f' 1 $total) | sed 's/,$//')]
+}
+EOF
+
+  tmux set-option -w @swarm_id "$swarm_id"
+  tmux set-option -w @swarm_panes "$pane_map"
+  tmux set-option -w @wt_panes "$wt_pane_map"
+
+  # Launch command in all panes
+  for ((i=0; i<${#panes[@]}; i++)); do
+    local pane="${panes[$i]}"
+    local wt="${worktree_dirs[$i]}"
+    # cd into worktree first, then launch
+    tmux send-keys -t "$pane" "cd '$wt'" C-m
+    tmux send-keys -t "$pane" "$cmd" C-m
+  done
+
+  tmux select-pane -t "${panes[0]}"
+
+  # Bootstrap if star topology
+  if $star; then
+    sleep 4
+    _swarm_bootstrap_conductor "agent-1" "$swarm_dir" "$swarm_id"
+    for agent_id in $(_swarm_agent_ids "$swarm_dir"); do
+      [[ "$agent_id" == "agent-1" ]] && continue
+      _swarm_bootstrap_worker "$agent_id" "$swarm_dir"
+    done
+  fi
+
+  echo "swarm: created '$name' ($swarm_id) with $total agents [worktree-isolated]"
+  for ((i=0; i<${#panes[@]}; i++)); do
+    local aid="agent-$((i+1))"
+    local br
+    br=$(jq -r '.branch' "$swarm_dir/agents/$aid.json" 2>/dev/null)
+    echo "  $aid → $br"
+  done
+}
+
+# Merge agent branches back to the base branch
+# Usage: swarm merge [agent-id|--all|--pr]
+_swarm_merge() {
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm merge: no active swarm."; return 1; }
+
+  local base_branch
+  base_branch=$(jq -r '.base_branch // empty' "$swarm_dir/swarm.json")
+  [[ -z "$base_branch" ]] && { echo "swarm merge: not a worktree swarm (no base_branch)."; return 1; }
+
+  local repo_root
+  repo_root=$(jq -r '.working_dir' "$swarm_dir/swarm.json")
+
+  local mode="pick" target="" use_pr=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all) mode="all"; shift ;;
+      --pr)  use_pr=true; shift ;;
+      *)     mode="single"; target="$1"; shift ;;
+    esac
+  done
+
+  _swarm_colors
+
+  # Collect mergeable agents (those with a branch that isn't the base)
+  local -a merge_agents
+  for agent_id in $(_swarm_agent_ids "$swarm_dir"); do
+    local branch
+    branch=$(jq -r '.branch // empty' "$swarm_dir/agents/$agent_id.json")
+    [[ -z "$branch" || "$branch" == "$base_branch" ]] && continue
+    merge_agents+=("$agent_id")
+  done
+
+  if (( ${#merge_agents[@]} == 0 )); then
+    echo "swarm merge: no agent branches to merge."
+    return
+  fi
+
+  # Pick targets
+  local -a targets
+  case "$mode" in
+    single)
+      [[ -f "$swarm_dir/agents/$target.json" ]] || { echo "swarm merge: agent '$target' not found."; return 1; }
+      targets=("$target")
+      ;;
+    all)
+      targets=("${merge_agents[@]}")
+      ;;
+    pick)
+      local src
+      src=$(_swarm_src)
+      local agent_list=""
+      for aid in "${merge_agents[@]}"; do
+        local branch wt
+        branch=$(jq -r '.branch' "$swarm_dir/agents/$aid.json")
+        wt=$(jq -r '.worktree // "n/a"' "$swarm_dir/agents/$aid.json")
+        agent_list+="$aid\t$branch\t$wt\n"
+      done
+
+      local selected
+      selected=$(echo -e "$agent_list" | \
+        fzf --tmux 70%,50% \
+          --header "tab: multi-select  enter: merge" \
+          --multi \
+          --delimiter $'\t' \
+          --preview "cd {3} 2>/dev/null && git diff --stat $base_branch" \
+          --preview-window "right:50%") || return 0
+
+      while IFS=$'\t' read -r aid _; do
+        [[ -n "$aid" ]] && targets+=("$aid")
+      done <<< "$selected"
+      ;;
+  esac
+
+  (( ${#targets[@]} == 0 )) && return
+
+  # Merge each target
+  local merged=0
+  for agent_id in "${targets[@]}"; do
+    local branch wt_dir
+    branch=$(jq -r '.branch' "$swarm_dir/agents/$agent_id.json")
+    wt_dir=$(jq -r '.worktree // empty' "$swarm_dir/agents/$agent_id.json")
+
+    printf "\n  ${_sw_bold}Merging${_sw_reset} %s (%s)\n" "$agent_id" "$branch"
+
+    if $use_pr; then
+      # Create PR
+      (cd "$wt_dir" 2>/dev/null && git push -u origin "$branch" 2>/dev/null && \
+        gh pr create --base "$base_branch" --head "$branch" \
+          --title "swarm: $agent_id ($branch)" \
+          --body "Auto-created by swarm merge from swarm agent $agent_id")
+      echo "  PR created for $branch"
+    else
+      # Direct merge
+      (cd "$repo_root" && git merge --no-ff "$branch" --no-edit 2>&1) || {
+        echo "  ${_sw_bold}Conflict merging $branch.${_sw_reset} Aborting merge."
+        (cd "$repo_root" && git merge --abort 2>/dev/null)
+        return 1
+      }
+      echo "  Merged $branch into $base_branch"
+    fi
+
+    # Clean up worktree (skip for PR mode -- branch still needed on remote)
+    if [[ -n "$wt_dir" && -d "$wt_dir" ]] && ! $use_pr; then
+      git worktree remove "$wt_dir" 2>/dev/null
+      git branch -d "$branch" 2>/dev/null
+      echo "  Cleaned up worktree"
+    fi
+
+    # Update agent status
+    local tmp
+    tmp=$(jq '.status = "merged"' "$swarm_dir/agents/$agent_id.json")
+    echo "$tmp" > "$swarm_dir/agents/$agent_id.json"
+    (( merged++ ))
+  done
+
+  echo ""
+  echo "swarm: merged $merged branch(es)."
+}
+
+# Check for merge conflicts between agent branches
+# Usage: swarm conflicts
+_swarm_conflicts() {
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm conflicts: no active swarm."; return 1; }
+
+  local base_branch
+  base_branch=$(jq -r '.base_branch // empty' "$swarm_dir/swarm.json")
+  [[ -z "$base_branch" ]] && { echo "swarm conflicts: not a worktree swarm."; return 1; }
+
+  _swarm_colors
+
+  # Collect branches
+  local -a agent_ids agent_branches
+  for agent_id in $(_swarm_agent_ids "$swarm_dir"); do
+    local branch
+    branch=$(jq -r '.branch // empty' "$swarm_dir/agents/$agent_id.json")
+    [[ -z "$branch" || "$branch" == "$base_branch" ]] && continue
+    agent_ids+=("$agent_id")
+    agent_branches+=("$branch")
+  done
+
+  local n=${#agent_ids[@]}
+  if (( n < 2 )); then
+    echo "swarm conflicts: need at least 2 worktree agents to check."
+    return
+  fi
+
+  printf "\n  ${_sw_bold}CONFLICT CHECK${_sw_reset} (vs $base_branch)\n"
+  echo "  ──────────────────────────────────────────────────"
+
+  local conflicts=0
+  for ((i=0; i<n; i++)); do
+    for ((j=i+1; j<n; j++)); do
+      local a="${agent_branches[$i]}" b="${agent_branches[$j]}"
+      local merge_base
+      merge_base=$(git merge-base "$a" "$b" 2>/dev/null)
+      if [[ -n "$merge_base" ]]; then
+        local result
+        result=$(git merge-tree "$merge_base" "$a" "$b" 2>/dev/null)
+        if echo "$result" | grep -q "^<<<<<<<"; then
+          printf "  ${_sw_orange}✗${_sw_reset} %s ↔ %s  ${_sw_orange}CONFLICT${_sw_reset}\n" "${agent_ids[$i]}" "${agent_ids[$j]}"
+          (( conflicts++ ))
+        else
+          printf "  ${_sw_green}✓${_sw_reset} %s ↔ %s  clean\n" "${agent_ids[$i]}" "${agent_ids[$j]}"
+        fi
+      fi
+    done
+  done
+
+  echo ""
+  if (( conflicts > 0 )); then
+    echo "  $conflicts conflict(s) detected. Consider merging sequentially."
+  else
+    echo "  No conflicts. Safe to merge in any order."
+  fi
+}
+
+# ------------------------------------------------------------------------------
 # FZF hub and pickers
 # ------------------------------------------------------------------------------
 
@@ -1567,7 +1983,13 @@ TOPOLOGIES
   swarm pipe <N> <cmd>     ▸ N sequential stages (pipeline)
   swarm pair <cmd>         ⇄ Coder + reviewer feedback loop
   swarm mixed <N> <cmd> [<N> <cmd>] ...  Mixed commands (e.g. 1 bash 2 cx)
+  swarm wt <N> <cmd>       Worktree-isolated (one branch per agent)
+  swarm wt <cmd> <branches...>          Use existing branches
   swarm mesh <N> <cmd>     ◆ Distributed across Tailscale devices
+
+WORKTREE
+  swarm merge [agent|--all|--pr]  Merge agent branches back
+  swarm conflicts                 Check for conflicts between branches
 
 COMMUNICATION
   swarm send <agent> <msg>   Message a specific agent
@@ -1609,6 +2031,9 @@ swarm() {
     pipe)               _swarm_pipe "$@" ;;
     pair)               _swarm_pair "$@" ;;
     mixed|mix)          _swarm_mixed "$@" ;;
+    wt|worktree)        _swarm_wt "$@" ;;
+    merge)              _swarm_merge "$@" ;;
+    conflicts)          _swarm_conflicts "$@" ;;
     mesh)               _swarm_mesh "$@" ;;
     send)               _swarm_send "$@" ;;
     broadcast|bc)       _swarm_broadcast "$@" ;;
