@@ -1,0 +1,181 @@
+# ==============================================================================
+# Auto-commit: Periodic background git commits
+# ==============================================================================
+#
+# Toggle automatic git commits on a timer. Useful during exploratory coding
+# sessions where you want a safety net without thinking about commits.
+#
+# Usage:
+#   acm on [interval]   Start auto-committing (default: 300s)
+#   acm off             Stop auto-committing
+#   acm status          Show current state
+#   acm log             Show recent auto-commits
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+_acm_state_dir="$HOME/.local/share/omacmux/autocommit"
+
+_acm_repo_hash() {
+  local repo_root="$1"
+  if command -v md5 &>/dev/null; then
+    md5 -q -s "$repo_root" | cut -c1-12
+  else
+    echo -n "$repo_root" | md5sum | cut -c1-12
+  fi
+}
+
+_acm_guard() {
+  git rev-parse --is-inside-work-tree &>/dev/null || {
+    echo -e "\033[31mNot a git repository.\033[0m"
+    return 1
+  }
+}
+
+# ------------------------------------------------------------------------------
+# Subcommands
+# ------------------------------------------------------------------------------
+
+_acm_on() {
+  local interval="${1:-300}"
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel)
+  local hash
+  hash=$(_acm_repo_hash "$repo_root")
+  local state_file="$_acm_state_dir/$hash.json"
+
+  # Check if already running
+  if [[ -f "$state_file" ]]; then
+    local pid
+    pid=$(jq -r '.pid' "$state_file" 2>/dev/null)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      local existing_interval
+      existing_interval=$(jq -r '.interval' "$state_file" 2>/dev/null)
+      echo -e "\033[33mAuto-commit already active — every ${existing_interval}s (PID: $pid)\033[0m"
+      return 0
+    fi
+    # Stale state file — clean up
+    rm -f "$state_file"
+  fi
+
+  mkdir -p "$_acm_state_dir"
+
+  # Launch background loop (subshell, not function — no `local`)
+  (
+    while true; do
+      # Check for stop signal
+      [[ -f "$_acm_state_dir/$hash.stop" ]] && rm -f "$_acm_state_dir/$hash.stop" "$_acm_state_dir/$hash.json" && exit 0
+
+      cd "$repo_root" || exit 1
+
+      # Check for changes
+      porcelain=$(git status --porcelain 2>/dev/null)
+      if [[ -n "$porcelain" ]]; then
+        files=$(echo "$porcelain" | wc -l | tr -d ' ')
+        names=$(echo "$porcelain" | head -3 | awk '{print $NF}' | tr '\n' ', ' | sed 's/,$//')
+        [[ $files -gt 3 ]] && names="$names, ..."
+        git add -A
+        git commit -m "[auto] update $files file(s): $names"
+      fi
+
+      sleep "$interval"
+    done
+  ) &>/dev/null & disown
+
+  local bg_pid=$!
+
+  # Save state
+  printf '{"pid": %d, "interval": %d, "repo": "%s", "started": "%s"}\n' \
+    "$bg_pid" "$interval" "$repo_root" "$(date -Iseconds)" > "$_acm_state_dir/$hash.json"
+
+  echo -e "\033[32mAuto-commit ON\033[0m — every ${interval}s in $repo_root (PID: $bg_pid)"
+}
+
+_acm_off() {
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel)
+  local hash
+  hash=$(_acm_repo_hash "$repo_root")
+  local state_file="$_acm_state_dir/$hash.json"
+
+  if [[ ! -f "$state_file" ]]; then
+    echo -e "\033[33mAuto-commit is not active for this repo.\033[0m"
+    return 0
+  fi
+
+  local pid
+  pid=$(jq -r '.pid' "$state_file" 2>/dev/null)
+
+  # Signal stop and kill as backup
+  touch "$_acm_state_dir/$hash.stop"
+  kill "$pid" 2>/dev/null
+  rm -f "$state_file"
+
+  echo -e "\033[32mAuto-commit OFF\033[0m"
+}
+
+_acm_status() {
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel)
+  local hash
+  hash=$(_acm_repo_hash "$repo_root")
+  local state_file="$_acm_state_dir/$hash.json"
+
+  if [[ -f "$state_file" ]]; then
+    local pid
+    pid=$(jq -r '.pid' "$state_file" 2>/dev/null)
+    if kill -0 "$pid" 2>/dev/null; then
+      local interval started
+      interval=$(jq -r '.interval' "$state_file" 2>/dev/null)
+      started=$(jq -r '.started' "$state_file" 2>/dev/null)
+      local last_auto
+      last_auto=$(git log -1 --format='%ar: %s' --grep='\[auto\]' 2>/dev/null)
+      echo -e "\033[32mActive\033[0m — every ${interval}s (PID: $pid)"
+      echo "  Started: $started"
+      echo "  Last auto-commit: ${last_auto:-none yet}"
+    else
+      # PID dead, clean up stale state
+      rm -f "$state_file"
+      echo -e "\033[2mInactive\033[0m (stale state cleaned)"
+    fi
+  else
+    echo -e "\033[2mInactive\033[0m"
+    local last_auto
+    last_auto=$(git log -1 --format='%ar: %s' --grep='\[auto\]' 2>/dev/null)
+    [[ -n "$last_auto" ]] && echo "  Last auto-commit: $last_auto"
+  fi
+}
+
+_acm_log() {
+  git log --oneline --grep='\[auto\]' -20
+}
+
+_acm_usage() {
+  cat <<'USAGE'
+Usage: acm <command> [args]
+
+Commands:
+  on [interval]   Start auto-committing (default: 300s)
+  off             Stop auto-committing
+  status          Show current state
+  log             Show recent auto-commits
+USAGE
+}
+
+# ------------------------------------------------------------------------------
+# Main dispatch
+# ------------------------------------------------------------------------------
+
+acm() {
+  local cmd="${1:-}"
+  shift 2>/dev/null
+
+  case "$cmd" in
+    on)     _acm_guard && _acm_on "$@" ;;
+    off)    _acm_guard && _acm_off ;;
+    status) _acm_guard && _acm_status ;;
+    log)    _acm_guard && _acm_log ;;
+    *)      _acm_usage ;;
+  esac
+}
