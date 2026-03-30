@@ -39,7 +39,7 @@ palette = 2=#FFC107
 palette = 3=#b91c1c
 palette = 4=#e68e0d
 palette = 5=#D35F5F
-palette = 6=#bebebe
+palette = 6=#5f9ea0
 palette = 7=#bebebe
 
 # Bright colors
@@ -49,5 +49,5 @@ palette = 10=#FFC107
 palette = 11=#b90a0a
 palette = 12=#f59e0b
 palette = 13=#B91C1C
-palette = 14=#eaeaea
+palette = 14=#7ec8ca
 palette = 15=#ffffff
