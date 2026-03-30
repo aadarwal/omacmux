@@ -656,6 +656,7 @@ EOF
 
   # Inject into pane (immediacy)
   _swarm_send_keys "$target" "$message"
+  command -v _agentlog_append &>/dev/null && _agentlog_append "$(_swarm_current_id 2>/dev/null)" "$target" "send" "[$sender→$target] $message"
   echo "swarm: sent to $target"
 }
 
