@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# sounds — audio notification utilities (subprocess-safe)
+# Reads voice state file directly instead of relying on shell env.
+
+# Stub guard: loads before voice alphabetically
+command -v _voice_enabled &>/dev/null || _voice_enabled() { return 1; }
+
+_VOICE_STATE_FILE="$HOME/.local/share/omacmux/voice/state.json"
+
+# _sound_enabled — subprocess-safe check for voice mode
+_sound_enabled() {
+  [[ -f "$_VOICE_STATE_FILE" ]] || return 1
+  local _enabled
+  _enabled=$(jq -r '.enabled // false' "$_VOICE_STATE_FILE" 2>/dev/null)
+  [[ "$_enabled" == "true" ]]
+}
+
+# _sound_play <event> — play a system sound effect
+_sound_play() {
+  _sound_enabled || return 0
+  local event="$1" path
+  case "$event" in
+    done)    path="/System/Library/Sounds/Glass.aiff" ;;
+    error)   path="/System/Library/Sounds/Sosumi.aiff" ;;
+    start)   path="/System/Library/Sounds/Pop.aiff" ;;
+    tick)    path="/System/Library/Sounds/Tink.aiff" ;;
+    warning) path="/System/Library/Sounds/Basso.aiff" ;;
+    finish)  path="/System/Library/Sounds/Hero.aiff" ;;
+    *)       return 1 ;;
+  esac
+  [[ -f "$path" ]] && afplay "$path" &>/dev/null &
+}
+
+# _sound_notify <event> <message> — play sound + speak message
+_sound_notify() {
+  _sound_enabled || return 0
+  local event="$1" message="$2"
+  _sound_play "$event"
+  [[ -n "$message" ]] && say -r 200 "$message" &>/dev/null &
+}
