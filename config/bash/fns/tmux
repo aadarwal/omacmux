@@ -13,6 +13,58 @@ _t_attach() {
   tmux attach-session -t "=$link"
 }
 
+# Switch client inside tmux using a linked session group.
+# Uses the tmux client PID so each terminal window gets a stable suffix.
+_t_switch() {
+  local name="$1"
+  local cpid
+  cpid=$(tmux display-message -p '#{client_pid}')
+  local link="${name}~${cpid}"
+  if ! tmux has-session -t "=$link" 2>/dev/null; then
+    tmux new-session -d -t "=$name" -s "$link"
+    tmux set-option -t "=$link" destroy-unattached on
+  fi
+  tmux switch-client -t "=$link"
+}
+
+# Switch to the next base session (wraps around)
+_t_switch_next() {
+  local current
+  current=$(tmux display-message -p '#S')
+  current="${current%%~*}"
+
+  local -a sessions
+  while IFS= read -r s; do sessions+=("$s"); done \
+    < <(tmux list-sessions -F '#S' | grep -v '^_stash$' | grep -v '~' | sort)
+  local count=${#sessions[@]}
+  (( count <= 1 )) && return
+
+  local idx=0
+  for ((i=0; i<count; i++)); do
+    [[ ${sessions[$i]} == "$current" ]] && { idx=$i; break; }
+  done
+  _t_switch "${sessions[$(( (idx + 1) % count ))]}"
+}
+
+# Switch to the previous base session (wraps around)
+_t_switch_prev() {
+  local current
+  current=$(tmux display-message -p '#S')
+  current="${current%%~*}"
+
+  local -a sessions
+  while IFS= read -r s; do sessions+=("$s"); done \
+    < <(tmux list-sessions -F '#S' | grep -v '^_stash$' | grep -v '~' | sort)
+  local count=${#sessions[@]}
+  (( count <= 1 )) && return
+
+  local idx=0
+  for ((i=0; i<count; i++)); do
+    [[ ${sessions[$i]} == "$current" ]] && { idx=$i; break; }
+  done
+  _t_switch "${sessions[$(( (idx - 1 + count) % count ))]}"
+}
+
 # Smart tmux entry point
 # Usage:
 #   t            -> outside tmux: attach last session or create "Work"
@@ -56,7 +108,7 @@ t() {
   # If session exists, attach/switch to it
   if tmux has-session -t "=$name" 2>/dev/null; then
     if [[ -n $TMUX ]]; then
-      tmux switch-client -t "=$name"
+      _t_switch "$name"
     else
       _t_attach "$name"
     fi
@@ -67,7 +119,7 @@ t() {
   local new_dir="${dir:-$PWD}"
   if [[ -n $TMUX ]]; then
     tmux new-session -d -s "$name" -c "$new_dir"
-    tmux switch-client -t "=$name"
+    _t_switch "$name"
   else
     tmux new-session -s "$name" -c "$new_dir"
   fi
@@ -93,7 +145,7 @@ tn() {
 
   if [[ -n $TMUX ]]; then
     tmux new-session -d -s "$name" -c "$dir"
-    tmux switch-client -t "=$name"
+    _t_switch "$name"
   else
     tmux new-session -s "$name" -c "$dir"
   fi
@@ -135,7 +187,7 @@ tp() {
   local session_name="${selected%%:*}"
 
   if [[ -n $TMUX ]]; then
-    tmux switch-client -t "=$session_name"
+    _t_switch "$session_name"
   else
     _t_attach "$session_name"
   fi
