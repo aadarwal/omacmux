@@ -1,0 +1,616 @@
+# ==============================================================================
+# Scan: Agent swarm codebase analysis system
+# ==============================================================================
+#
+# Deploy agent swarms into any codebase with specialized missions. Profiles
+# the repo, partitions it into zones, then launches a star-topology swarm
+# where a conductor delegates zone analysis to workers.
+#
+# Usage:
+#   scan explore              # architecture & design analysis
+#   scan audit                # security & quality audit
+#   scan research             # deep research into patterns
+#   scan review               # code review pass
+#   scan test                 # test coverage analysis
+#   scan "custom prompt"      # freeform scan mission
+#   scan status               # check scan progress
+#   scan collect              # aggregate results
+#   scan report               # view final report
+
+# ------------------------------------------------------------------------------
+# Constants & stub guards
+# ------------------------------------------------------------------------------
+
+SCAN_DIR="$HOME/.local/share/omacmux/scans"
+command -v _voice_say &>/dev/null || _voice_say() { :; }
+command -v _voice_sound &>/dev/null || _voice_sound() { :; }
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+_scan_repo_slug() {
+  local root
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  echo "$root" | sed 's|^/||; s|/|_|g'
+}
+
+_scan_state_dir() {
+  echo "$SCAN_DIR/$(_scan_repo_slug)"
+}
+
+# Map file extension to language name
+_scan_ext_to_lang() {
+  case "$1" in
+    ts)   echo "TypeScript" ;;
+    tsx)  echo "TypeScript (JSX)" ;;
+    js)   echo "JavaScript" ;;
+    jsx)  echo "JavaScript (JSX)" ;;
+    py)   echo "Python" ;;
+    rs)   echo "Rust" ;;
+    go)   echo "Go" ;;
+    rb)   echo "Ruby" ;;
+    java) echo "Java" ;;
+    c)    echo "C" ;;
+    cpp)  echo "C++" ;;
+    h)    echo "C/C++ Header" ;;
+    cs)   echo "C#" ;;
+    sh)   echo "Shell" ;;
+    md)   echo "Markdown" ;;
+    json) echo "JSON" ;;
+    yaml|yml) echo "YAML" ;;
+    toml) echo "TOML" ;;
+    css)  echo "CSS" ;;
+    html) echo "HTML" ;;
+    sql)  echo "SQL" ;;
+    *)    echo "$1" ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Profile: fast repo analysis (pure bash/git, no AI)
+# ------------------------------------------------------------------------------
+
+_scan_profile() {
+  local state_dir
+  state_dir=$(_scan_state_dir)
+  mkdir -p "$state_dir"
+
+  local git_root
+  git_root=$(git rev-parse --show-toplevel 2>/dev/null)
+  local repo_name
+  repo_name=$(basename "$git_root")
+  local remote_url
+  remote_url=$(git remote get-url origin 2>/dev/null || echo "(none)")
+
+  # Cache file list once
+  local file_list_cache
+  file_list_cache=$(mktemp)
+  git ls-files > "$file_list_cache"
+  local total_files
+  total_files=$(wc -l < "$file_list_cache" | tr -d ' ')
+
+  local profile="$state_dir/profile.md"
+
+  {
+    echo "# Codebase Profile: $repo_name"
+    echo ""
+    echo "- **Remote:** $remote_url"
+    echo "- **Total files:** $total_files"
+    echo ""
+
+    # Languages by extension
+    echo "## Languages"
+    echo ""
+    sed -n 's/.*\.//p' "$file_list_cache" | sort | uniq -c | sort -rn | head -20 | while read -r count ext; do
+      local lang
+      lang=$(_scan_ext_to_lang "$ext")
+      printf '%s\n' "- $lang (.$ext): $count files"
+    done
+    echo ""
+
+    # LOC per top-level directory
+    echo "## Lines of Code by Directory"
+    echo ""
+    local total_loc=0
+    for dir in $(cut -d/ -f1 "$file_list_cache" | sort -u); do
+      if [[ -d "$dir" ]]; then
+        local loc
+        loc=$(grep "^${dir}/" "$file_list_cache" | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
+        [[ -n "$loc" ]] && printf '%s\n' "- $dir/: $loc lines" && total_loc=$((total_loc + loc))
+      fi
+    done
+    echo ""
+    echo "**Total LOC:** $total_loc"
+    echo ""
+
+    # Directory tree (2 levels)
+    echo "## Directory Structure"
+    echo '```'
+    find "$git_root" -maxdepth 2 -type d ! -name '.git' ! -path '*/.git/*' | sed "s|$git_root|.|" | sort
+    echo '```'
+    echo ""
+
+    # Key config files
+    echo "## Key Config Files"
+    echo ""
+    local configs="package.json Cargo.toml go.mod pyproject.toml Makefile Dockerfile tsconfig.json requirements.txt Gemfile"
+    for cfg in $configs; do
+      [[ -f "$git_root/$cfg" ]] && echo "- $cfg"
+    done
+    [[ -d "$git_root/.github/workflows" ]] && echo "- .github/workflows/"
+    echo ""
+
+    # README excerpt
+    if [[ -f "$git_root/README.md" ]]; then
+      echo "## README (excerpt)"
+      echo ""
+      head -50 "$git_root/README.md" 2>/dev/null
+      echo ""
+    fi
+
+    # Recent commits
+    echo "## Recent Commits"
+    echo '```'
+    git log --oneline -20
+    echo '```'
+  } > "$profile"
+
+  rm -f "$file_list_cache"
+
+  local total_loc_display
+  total_loc_display=$(grep 'Total LOC' "$profile" | grep -oE '[0-9]+' | head -1)
+  echo -e "\033[36mscan:\033[0m profiled $repo_name ($total_files files, ${total_loc_display:-0} LOC)"
+}
+
+# ------------------------------------------------------------------------------
+# Partition: divide codebase into zones
+# ------------------------------------------------------------------------------
+
+_scan_partition() {
+  local state_dir
+  state_dir=$(_scan_state_dir)
+  mkdir -p "$state_dir"
+
+  local zones_file="$state_dir/zones.json"
+  local -a zone_ids zone_paths zone_files zone_locs zone_langs
+  local zone_count=0
+
+  # Cache file list once
+  local file_list_cache
+  file_list_cache=$(mktemp)
+  git ls-files > "$file_list_cache"
+
+  # Collect top-level directories
+  local dirs
+  dirs=$(cut -d/ -f1 "$file_list_cache" | sort -u)
+
+  local root_file_count=0
+  for entry in $dirs; do
+    if [[ -d "$entry" ]]; then
+      local dir_files_cache
+      dir_files_cache=$(mktemp)
+      grep "^${entry}/" "$file_list_cache" > "$dir_files_cache"
+
+      local fcount loc dominant_ext
+      fcount=$(wc -l < "$dir_files_cache" | tr -d ' ')
+      loc=$(xargs wc -l < "$dir_files_cache" 2>/dev/null | tail -1 | awk '{print $1}')
+      dominant_ext=$(sed -n 's/.*\.//p' "$dir_files_cache" | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+      rm -f "$dir_files_cache"
+
+      local lang
+      lang=$(_scan_ext_to_lang "${dominant_ext:-unknown}")
+
+      zone_ids+=("zone-$((zone_count + 1))")
+      zone_paths+=("$entry/")
+      zone_files+=("$fcount")
+      zone_locs+=("${loc:-0}")
+      zone_langs+=("$lang")
+      (( zone_count++ ))
+    else
+      (( root_file_count++ ))
+    fi
+  done
+
+  # Add root zone if enough root-level files
+  if (( root_file_count > 5 )); then
+    local root_files_cache
+    root_files_cache=$(mktemp)
+    grep -v '/' "$file_list_cache" > "$root_files_cache"
+
+    local root_loc
+    root_loc=$(xargs wc -l < "$root_files_cache" 2>/dev/null | tail -1 | awk '{print $1}')
+    local root_ext
+    root_ext=$(sed -n 's/.*\.//p' "$root_files_cache" | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+    rm -f "$root_files_cache"
+
+    zone_ids+=("zone-$((zone_count + 1))")
+    zone_paths+=("root")
+    zone_files+=("$root_file_count")
+    zone_locs+=("${root_loc:-0}")
+    zone_langs+=("${root_ext:-mixed}")
+    (( zone_count++ ))
+  fi
+
+  rm -f "$file_list_cache"
+
+  # If fewer than 3 zones, partition by language instead
+  if (( zone_count < 3 )); then
+    zone_ids=()
+    zone_paths=()
+    zone_files=()
+    zone_locs=()
+    zone_langs=()
+    zone_count=0
+
+    local exts
+    exts=$(git ls-files | sed -n 's/.*\.//p' | sort | uniq -c | sort -rn | head -8 | awk '{print $2}')
+    for ext in $exts; do
+      local fcount loc
+      fcount=$(git ls-files "*.${ext}" | wc -l | tr -d ' ')
+      loc=$(git ls-files "*.${ext}" | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
+      local lang
+      lang=$(_scan_ext_to_lang "$ext")
+
+      zone_ids+=("zone-$((zone_count + 1))")
+      zone_paths+=("*.$ext")
+      zone_files+=("$fcount")
+      zone_locs+=("${loc:-0}")
+      zone_langs+=("$lang")
+      (( zone_count++ ))
+    done
+  fi
+
+  # If more than 8 zones, merge extras into misc
+  if (( zone_count > 8 )); then
+    local -a sorted_indices
+    sorted_indices=($(for i in $(seq 0 $((zone_count - 1))); do
+      echo "${zone_locs[$i]} $i"
+    done | sort -rn | awk '{print $2}'))
+
+    local -a new_ids new_paths new_files new_locs new_langs
+    local misc_files=0 misc_loc=0
+    for idx in $(seq 0 $((${#sorted_indices[@]} - 1))); do
+      local si="${sorted_indices[$idx]}"
+      if (( idx < 7 )); then
+        new_ids+=("zone-$((idx + 1))")
+        new_paths+=("${zone_paths[$si]}")
+        new_files+=("${zone_files[$si]}")
+        new_locs+=("${zone_locs[$si]}")
+        new_langs+=("${zone_langs[$si]}")
+      else
+        misc_files=$((misc_files + zone_files[si]))
+        misc_loc=$((misc_loc + zone_locs[si]))
+      fi
+    done
+    new_ids+=("zone-8")
+    new_paths+=("misc")
+    new_files+=("$misc_files")
+    new_locs+=("$misc_loc")
+    new_langs+=("mixed")
+
+    zone_ids=("${new_ids[@]}")
+    zone_paths=("${new_paths[@]}")
+    zone_files=("${new_files[@]}")
+    zone_locs=("${new_locs[@]}")
+    zone_langs=("${new_langs[@]}")
+    zone_count=${#zone_ids[@]}
+  fi
+
+  # Write JSON
+  {
+    printf '['
+    for i in $(seq 0 $((zone_count - 1))); do
+      (( i > 0 )) && printf ','
+      printf '{"id":"%s","path":"%s","files":%s,"loc":%s,"primary_language":"%s"}' \
+        "${zone_ids[$i]}" "${zone_paths[$i]}" "${zone_files[$i]}" "${zone_locs[$i]}" "${zone_langs[$i]}"
+    done
+    printf ']\n'
+  } > "$zones_file"
+
+  echo -e "\033[36mscan:\033[0m partitioned into $zone_count zones"
+}
+
+# ------------------------------------------------------------------------------
+# Built-in scan modes
+# ------------------------------------------------------------------------------
+
+_scan_mode_explore() {
+  cat <<'MISSION'
+Analyze the architecture and design of this codebase zone. Document:
+1. Module/component structure and responsibilities
+2. Key abstractions, interfaces, and data flow
+3. External dependencies and how they're used
+4. Entry points and public API surface
+5. Design patterns employed
+6. Notable conventions or idioms
+Be specific: cite file paths, function names, line numbers.
+MISSION
+}
+
+_scan_mode_audit() {
+  cat <<'MISSION'
+Perform a security and quality audit of this codebase zone. Document:
+1. Security vulnerabilities (injection, auth, crypto, secrets)
+2. Error handling gaps and crash risks
+3. Performance bottlenecks and resource leaks
+4. Code quality issues (dead code, complexity, duplication)
+5. Dependency risks (outdated, vulnerable, unnecessary)
+Be specific: cite file paths, function names, line numbers.
+MISSION
+}
+
+_scan_mode_research() {
+  cat <<'MISSION'
+Deep-dive research into the patterns and architecture of this codebase zone. Document:
+1. Core algorithms and data structures used
+2. Concurrency/async patterns and potential races
+3. State management approach
+4. Testing strategy and coverage gaps
+5. Documentation quality and accuracy
+Be specific: cite file paths, function names, line numbers.
+MISSION
+}
+
+_scan_mode_review() {
+  cat <<'MISSION'
+Perform a thorough code review of this codebase zone. Document:
+1. Code correctness issues and logic bugs
+2. API design and consistency problems
+3. Missing validation and edge cases
+4. Readability and maintainability concerns
+5. Suggestions for improvement with concrete examples
+Be specific: cite file paths, function names, line numbers.
+MISSION
+}
+
+_scan_mode_test() {
+  cat <<'MISSION'
+Analyze test coverage and quality for this codebase zone. Document:
+1. Existing test files and what they cover
+2. Untested code paths and functions
+3. Test quality: assertions, edge cases, mocking
+4. Integration vs unit test balance
+5. Suggestions for critical tests to add
+Be specific: cite file paths, function names, line numbers.
+MISSION
+}
+
+# ------------------------------------------------------------------------------
+# Deploy: launch swarm with profiled context
+# ------------------------------------------------------------------------------
+
+_scan_deploy() {
+  local mode="$1" custom="${2:-}"
+  local state_dir
+  state_dir=$(_scan_state_dir)
+
+  local profile zones
+  profile=$(cat "$state_dir/profile.md" 2>/dev/null)
+  zones=$(cat "$state_dir/zones.json" 2>/dev/null)
+
+  [[ -z "$profile" ]] && { echo "scan: profile not found. Run _scan_profile first."; return 1; }
+  [[ -z "$zones" ]] && { echo "scan: zones not found. Run _scan_partition first."; return 1; }
+
+  # Calculate agent count: zone_count + 1 (conductor), clamped [3, 8]
+  local zone_count
+  zone_count=$(echo "$zones" | tr ',' '\n' | grep -c '"id"')
+  local agent_count=$((zone_count + 1))
+  (( agent_count < 3 )) && agent_count=3
+  (( agent_count > 8 )) && agent_count=8
+
+  # Generate scan ID
+  local scan_id
+  scan_id=$(date +%s | shasum | head -c 8)
+
+  # Create scan directory
+  local scan_dir="$state_dir/scans/$scan_id"
+  mkdir -p "$scan_dir"
+
+  # Write scan metadata
+  printf '{"scan_id":"%s","mode":"%s","agent_count":%d,"zone_count":%d,"started":"%s","status":"running"}\n' \
+    "$scan_id" "$mode" "$agent_count" "$zone_count" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    > "$state_dir/scan.json"
+
+  # Launch swarm
+  swarm star "$agent_count" cxx
+
+  # Wait for agents to initialize
+  sleep 5
+
+  # Resolve mission prompt
+  local mission
+  if declare -f "_scan_mode_$mode" &>/dev/null; then
+    mission=$("_scan_mode_$mode")
+  elif [[ -n "$custom" ]]; then
+    mission="$custom"
+  else
+    mission="Analyze this codebase zone thoroughly. Document key findings with file paths and line numbers."
+  fi
+
+  # Parse zones once, build both zone_list and worker_cmds together
+  local zone_list="" worker_cmds=""
+  local worker_n=2
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local zid zpath zfiles zlang
+    zid=$(echo "$line" | jq -r '.id')
+    zpath=$(echo "$line" | jq -r '.path')
+    zfiles=$(echo "$line" | jq -r '.files')
+    zlang=$(echo "$line" | jq -r '.primary_language')
+    zone_list+="  - $zid: $zpath ($zfiles files, $zlang)"$'\n'
+    worker_cmds+="swarm send agent-$worker_n \"Analyze zone: $zpath ($zfiles files, $zlang). $mission Write findings to a file, be specific with file paths and line numbers.\""$'\n'
+    (( worker_n++ ))
+  done < <(echo "$zones" | jq -c '.[]')
+
+  # Send conductor prompt
+  local conductor_prompt
+  conductor_prompt="You are the conductor of a codebase scan. Your mission:
+$mission
+
+CODEBASE PROFILE:
+$(head -30 "$state_dir/profile.md")
+
+ZONES (assign one per worker):
+$zone_list
+INSTRUCTIONS:
+1. Delegate each zone to a worker by running these commands:
+$worker_cmds
+2. Monitor progress by checking worker result files
+3. When workers finish, write a synthesis to $state_dir/report.md
+
+Start by running the swarm send commands above to delegate zones to workers."
+
+  _swarm_send_keys agent-1 "$conductor_prompt"
+
+  echo -e "\033[36mscan:\033[0m $agent_count agents deployed for \033[1m$mode\033[0m scan"
+}
+
+# ------------------------------------------------------------------------------
+# Collect: aggregate results
+# ------------------------------------------------------------------------------
+
+_scan_collect() {
+  local state_dir
+  state_dir=$(_scan_state_dir)
+
+  [[ -f "$state_dir/scan.json" ]] || { echo "scan: no active scan found."; return 1; }
+
+  echo -e "\033[36mscan:\033[0m collecting results..."
+
+  # Collect swarm output
+  swarm collect 2>/dev/null
+
+  # Copy swarm results to scan dir
+  local swarm_dir
+  swarm_dir=$(_swarm_dir 2>/dev/null)
+  if [[ -n "$swarm_dir" && -f "$swarm_dir/summary.md" ]]; then
+    cp "$swarm_dir/summary.md" "$state_dir/raw_results.md"
+  fi
+
+  # Generate AI executive summary
+  local raw_results=""
+  [[ -f "$state_dir/raw_results.md" ]] && raw_results=$(cat "$state_dir/raw_results.md")
+  local profile=""
+  [[ -f "$state_dir/profile.md" ]] && profile=$(head -20 "$state_dir/profile.md")
+
+  if [[ -n "$raw_results" ]]; then
+    local summary
+    summary=$(claude --print -p "You are summarizing the results of a codebase scan. Write an executive summary with key findings, organized by theme. Be specific about file paths and issues found.
+
+PROFILE:
+$profile
+
+RAW RESULTS:
+$raw_results" 2>/dev/null)
+
+    if [[ -n "$summary" ]]; then
+      {
+        echo "# Scan Report"
+        echo "Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo ""
+        echo "$summary"
+      } > "$state_dir/report.md"
+    fi
+  fi
+
+  # Update scan status
+  if [[ -f "$state_dir/scan.json" ]]; then
+    local tmp
+    tmp=$(mktemp)
+    jq '.status = "complete" | .completed = now' "$state_dir/scan.json" > "$tmp" 2>/dev/null \
+      && mv "$tmp" "$state_dir/scan.json" \
+      || rm -f "$tmp"
+  fi
+
+  echo -e "\033[36mscan:\033[0m results collected"
+  [[ -f "$state_dir/report.md" ]] && echo "  report: $state_dir/report.md"
+  _voice_say "Scan results collected"
+  _voice_sound done
+}
+
+# ------------------------------------------------------------------------------
+# Status: show scan progress
+# ------------------------------------------------------------------------------
+
+_scan_status() {
+  local state_dir
+  state_dir=$(_scan_state_dir 2>/dev/null)
+
+  if [[ -z "$state_dir" || ! -f "$state_dir/scan.json" ]]; then
+    echo -e "\033[36mscan:\033[0m no active scan"
+    return 0
+  fi
+
+  local mode status started agent_count zone_count
+  mode=$(jq -r '.mode // "unknown"' "$state_dir/scan.json" 2>/dev/null)
+  status=$(jq -r '.status // "unknown"' "$state_dir/scan.json" 2>/dev/null)
+  started=$(jq -r '.started // "unknown"' "$state_dir/scan.json" 2>/dev/null)
+  agent_count=$(jq -r '.agent_count // 0' "$state_dir/scan.json" 2>/dev/null)
+  zone_count=$(jq -r '.zone_count // 0' "$state_dir/scan.json" 2>/dev/null)
+
+  # Calculate elapsed time
+  local elapsed="unknown"
+  if [[ "$started" != "unknown" ]]; then
+    local start_epoch now_epoch
+    start_epoch=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$started" +%s 2>/dev/null || date -d "$started" +%s 2>/dev/null)
+    now_epoch=$(date +%s)
+    if [[ -n "$start_epoch" ]]; then
+      local diff=$(( now_epoch - start_epoch ))
+      elapsed="$((diff / 60))m$((diff % 60))s"
+    fi
+  fi
+
+  # Check for result files
+  local completed_zones=0
+  local swarm_dir
+  swarm_dir=$(_swarm_dir 2>/dev/null)
+  if [[ -n "$swarm_dir" && -d "$swarm_dir/results" ]]; then
+    completed_zones=$(find "$swarm_dir/results" -name '*.md' -size +0 2>/dev/null | wc -l | tr -d ' ')
+  fi
+
+  echo -e "\033[1mScan Status\033[0m"
+  echo -e "  Mode:    \033[36m$mode\033[0m"
+  echo -e "  Status:  \033[33m$status\033[0m"
+  echo -e "  Agents:  $agent_count"
+  echo -e "  Zones:   $completed_zones/$zone_count complete"
+  echo -e "  Elapsed: $elapsed"
+  [[ -f "$state_dir/report.md" ]] && echo -e "  Report:  \033[32m$state_dir/report.md\033[0m"
+}
+
+# ------------------------------------------------------------------------------
+# Orchestration
+# ------------------------------------------------------------------------------
+
+_scan_run() {
+  local mode="$1" custom="${2:-}"
+  _voice_say "Starting $mode scan"
+  _voice_sound start
+  local state_dir
+  state_dir=$(_scan_state_dir)
+  mkdir -p "$state_dir"
+  echo -e "\033[36mscan:\033[0m profiling repository..."
+  _scan_profile
+  echo -e "\033[36mscan:\033[0m partitioning into zones..."
+  _scan_partition
+  echo -e "\033[36mscan:\033[0m deploying agents..."
+  _scan_deploy "$mode" "$custom"
+  echo -e "\033[36mscan:\033[0m agents working. Use '\033[1mscan status\033[0m' to check, '\033[1mscan collect\033[0m' when done."
+}
+
+# ==============================================================================
+# Main dispatcher
+# ==============================================================================
+
+scan() {
+  git rev-parse --is-inside-work-tree &>/dev/null || { echo "scan: not a git repo"; return 1; }
+  [[ -z "$TMUX" ]] && { echo "scan: requires tmux"; return 1; }
+  case "${1:-}" in
+    "") echo "Usage: scan {explore|audit|research|review|test|status|collect|report} or scan \"<prompt>\"" ;;
+    explore|audit|research|review|test) _scan_run "$1" ;;
+    status) _scan_status ;;
+    collect) _scan_collect ;;
+    report) command -v scanreport &>/dev/null && scanreport || echo "scanreport not available" ;;
+    *) _scan_run "custom" "$*" ;;
+  esac
+}
