@@ -8,9 +8,18 @@
 _t_attach() {
   local name="$1"
   local link="${name}~$$"
-  tmux new-session -d -t "=$name" -s "$link"
-  tmux set-option -t "=$link" destroy-unattached on
-  tmux attach-session -t "=$link"
+  # Clean up any stale linked session with this name
+  tmux kill-session -t "=$link" 2>/dev/null
+  if tmux new-session -d -t "=$name" -s "$link" 2>/dev/null; then
+    # Set destroy-unattached via a hook so it only fires AFTER a client has
+    # attached and then detached — avoids destroying the session while it's
+    # still in its initial detached state.
+    tmux set-hook -t "=$link" client-detached "kill-session -t '=$link'"
+    tmux attach-session -t "=$link"
+  else
+    # Fallback: attach directly to the base session
+    tmux attach-session -t "=$name"
+  fi
 }
 
 # Use the invoking client's PID when available so linked sessions stay bound
@@ -32,8 +41,13 @@ _t_switch() {
   cpid=$(_t_client_pid "$cpid")
   local link="${name}~${cpid}"
   if ! tmux has-session -t "=$link" 2>/dev/null; then
-    tmux new-session -d -t "=$name" -s "$link"
-    tmux set-option -t "=$link" destroy-unattached on
+    if tmux new-session -d -t "=$name" -s "$link" 2>/dev/null; then
+      tmux set-hook -t "=$link" client-detached "kill-session -t '=$link'"
+    else
+      # Fallback: switch directly to the base session
+      tmux switch-client -t "=$name"
+      return
+    fi
   fi
   tmux switch-client -t "=$link"
 }
