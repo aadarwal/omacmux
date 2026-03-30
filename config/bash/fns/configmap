@@ -1,0 +1,84 @@
+# ==============================================================================
+# Config Inventory Map — fzf browser for all editable configs
+# ==============================================================================
+
+# Internal registry of all config files
+# Returns tab-delimited: category\tname\tpath\tdescription
+_cfgmap_entries() {
+  local p="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"
+  local cyan='\033[36m' green='\033[32m' yellow='\033[33m'
+  local magenta='\033[35m' blue='\033[34m' red='\033[31m'
+  local bcyan='\033[1;36m' dim='\033[2m' reset='\033[0m'
+
+  printf "${cyan}terminal${reset}\tghostty\t${p}/config/ghostty/config\tFont, colors, window chrome\n"
+  printf "${green}tmux${reset}\ttmux\t${p}/config/tmux/tmux.conf\tKeybindings, theme, status bar\n"
+  printf "${green}tmux${reset}\tsession-bar\t${p}/config/tmux/session-bar.sh\tDynamic session bar renderer\n"
+  printf "${yellow}shell${reset}\tbashrc\t${p}/shell/bashrc\tShell initialization, source order\n"
+  printf "${yellow}shell${reset}\taliases\t${p}/config/bash/aliases\tCommand shortcuts (cx, cxx, ls, etc)\n"
+  printf "${yellow}shell${reset}\tenvs\t${p}/config/bash/envs\tEnvironment variables, PATH\n"
+  printf "${yellow}shell${reset}\tinit\t${p}/config/bash/init\tTool initialization (mise, starship, fzf)\n"
+  printf "${yellow}shell${reset}\tinputrc\t${p}/config/bash/inputrc\tReadline key bindings\n"
+  printf "${yellow}shell-fns${reset}\tgit\t${p}/config/bash/fns/git\tGit fzf functions (gb, gl, ga, gd)\n"
+  printf "${yellow}shell-fns${reset}\ttmux\t${p}/config/bash/fns/tmux\tSession and layout functions\n"
+  printf "${yellow}shell-fns${reset}\tworktree\t${p}/config/bash/fns/worktree\tGit worktree management\n"
+  printf "${yellow}shell-fns${reset}\tswarm\t${p}/config/bash/fns/swarm\tAgent swarm coordination\n"
+  printf "${yellow}shell-fns${reset}\tmesh\t${p}/config/bash/fns/mesh\tTailscale device hub\n"
+  printf "${yellow}shell-fns${reset}\tutils\t${p}/config/bash/fns/utils\tGeneral utilities (rgi, fdi, fp)\n"
+  printf "${magenta}editor${reset}\tnvim\t${p}/config/nvim\tNeovim config directory\n"
+  printf "${blue}prompt${reset}\tstarship\t${p}/config/starship.toml\tPrompt theme and format\n"
+  printf "${red}git${reset}\tgitconfig\t${p}/config/git/config\tGit settings, aliases, credentials\n"
+  printf "${bcyan}ai${reset}\tclaude\t${p}/config/claude/settings.json\tClaude Code model and permissions\n"
+  printf "${dim}system${reset}\tlinks\t${p}/links.sh\tSymlink manifest\n"
+  printf "${dim}system${reset}\tbrewfile\t${p}/Brewfile\tHomebrew package dependencies\n"
+  printf "${dim}system${reset}\tinstall\t${p}/install.sh\tInstallation script\n"
+  printf "${dim}system${reset}\tupgrade\t${p}/upgrade.sh\tUpgrade script\n"
+}
+
+# fzf browser of all editable configs
+# Usage: cfgmap [filter]
+cfgmap() {
+  local entry
+  entry=$(_cfgmap_entries \
+    | fzf --ansi --tmux 80%,70% \
+      --delimiter '\t' \
+      --with-nth '1,2,4' \
+      --query "${1:-}" \
+      --header "enter: edit  ctrl-o: open in finder" \
+      --preview '[[ -d {3} ]] && ls -la --color=always {3} 2>/dev/null || bat --style=numbers --color=always {3} 2>/dev/null || cat {3}' \
+      --preview-window "right:55%" \
+      --bind 'ctrl-o:execute-silent(open -R {3})') || return 0
+
+  local filepath
+  filepath=$(echo "$entry" | cut -d$'\t' -f3)
+  [[ -z $filepath ]] && return 0
+  ${EDITOR:-nvim} "$filepath"
+}
+
+# Quick-edit config by short name
+# Usage: cfgedit <name>
+cfgedit() {
+  if [[ -z $1 ]]; then
+    echo "Usage: cfgedit <name>"
+    echo "Names: ghostty tmux session-bar bashrc aliases envs init inputrc"
+    echo "       git worktree swarm mesh utils nvim starship gitconfig"
+    echo "       claude links brewfile install upgrade"
+    return 1
+  fi
+
+  local matches
+  matches=$(_cfgmap_entries | awk -F'\t' -v name="$1" '{
+    gsub(/\033\[[0-9;]*m/, "", $1)
+    if ($2 == name) print $0
+  }')
+
+  local count=0
+  [[ -n $matches ]] && count=$(echo "$matches" | wc -l | tr -d ' ')
+
+  if [[ $count -eq 1 ]]; then
+    local filepath
+    filepath=$(echo "$matches" | cut -d$'\t' -f3)
+    ${EDITOR:-nvim} "$filepath"
+  else
+    cfgmap "$1"
+  fi
+}
