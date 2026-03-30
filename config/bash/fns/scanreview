@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# scanreview — scan modes for code review and test coverage analysis
+
+command -v _scan_state_dir &>/dev/null || return 0
+
+# _scan_mode_review — code quality review mission prompt
+_scan_mode_review() {
+  cat <<'PROMPT'
+You are performing a code quality review. Analyze the codebase systematically across the following dimensions:
+
+## 1. Style Consistency
+- Naming conventions: variables, functions, classes, files
+- Formatting: indentation, line length, whitespace usage
+- Comment quality: accuracy, usefulness, staleness
+- Import organization: grouping, ordering, unused imports
+
+## 2. Pattern Analysis
+- Design patterns used and whether they are applied consistently
+- Error handling: consistency, completeness, appropriate granularity
+- State management: clarity, predictability, mutation patterns
+- API design: naming, parameter ordering, return value conventions
+
+## 3. Improvement Suggestions
+- Readability: complex expressions, deeply nested logic, unclear names
+- Simplification: redundant code, over-engineering, unnecessary abstractions
+- Abstraction boundaries: leaky abstractions, misplaced responsibilities
+- Missing documentation: public APIs, non-obvious behavior, edge cases
+
+## 4. Strengths
+- Well-designed components worth highlighting as examples
+- Clever solutions that solve hard problems elegantly
+- Good testing patterns that should be replicated
+- Strong architectural decisions worth documenting
+
+Report each observation in this format:
+
+### [CATEGORY] Observation Title
+- **Location**: file:line
+- **Current**: What it does now
+- **Suggested**: What would improve it
+- **Priority**: High|Medium|Low
+PROMPT
+}
+
+# _scan_mode_test — test coverage analysis mission prompt
+_scan_mode_test() {
+  cat <<'PROMPT'
+You are performing a test coverage analysis. Analyze the codebase systematically across the following dimensions:
+
+## 1. Coverage Gaps
+- Public functions and methods with no corresponding test
+- Critical code paths that lack test coverage
+- Edge cases and boundary conditions not exercised by tests
+- Error paths and failure modes left untested
+
+## 2. Test Quality
+- Tests that verify implementation details rather than behavior
+- Brittle tests coupled to internal structure or ordering
+- Missing assertions where tests run code but verify nothing
+- Flaky patterns: time-dependent, order-dependent, environment-dependent
+
+## 3. Test Strategy
+- Balance of unit vs integration vs e2e tests
+- Mock and stub usage: over-mocking, under-mocking, mock fidelity
+- Test data management: fixtures, factories, hardcoded values
+- Test isolation: shared state, cleanup, parallel safety
+
+## 4. Recommended Tests
+- Specific test cases with concrete inputs and expected outputs
+- Infrastructure improvements: helpers, fixtures, test utilities
+- Tests that would catch the most likely regressions
+- Tests that document important behavior or edge cases
+
+Report each finding in this format:
+
+### Untested: [function/module name]
+- **Location**: file:line
+- **Risk**: What could break
+- **Suggested Test**:
+  - Input: ...
+  - Expected: ...
+  - Type: unit|integration|e2e
+PROMPT
+}
