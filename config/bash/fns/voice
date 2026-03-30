@@ -1,0 +1,98 @@
+# ==============================================================================
+# Voice Mode: Voice-first interaction layer for omacmux
+# ==============================================================================
+#
+# Foundation for voice features. Controls text-to-speech feedback and system
+# sounds triggered by agent and terminal events.
+#
+# Usage:
+#   voice on       Enable voice mode
+#   voice off      Disable voice mode
+#   voice status   Show current state
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+_voice_state_dir="$HOME/.local/share/omacmux/voice"
+_voice_state_file="$_voice_state_dir/state.json"
+
+_voice_enabled() {
+  [[ "${OMACMUX_VOICE:-0}" == "1" ]] && return 0
+  [[ -f "$_voice_state_file" ]] && [[ "$(jq -r '.enabled // false' "$_voice_state_file" 2>/dev/null)" == "true" ]] && return 0
+  return 1
+}
+
+_voice_say() {
+  _voice_enabled || return 0
+  killall say 2>/dev/null
+  say -r 200 "$*" &>/dev/null &
+}
+
+_voice_sound() {
+  _voice_enabled || return 0
+  local event="$1"
+  local sound_file
+  case "$event" in
+    done)    sound_file="/System/Library/Sounds/Glass.aiff" ;;
+    error)   sound_file="/System/Library/Sounds/Sosumi.aiff" ;;
+    start)   sound_file="/System/Library/Sounds/Pop.aiff" ;;
+    tick)    sound_file="/System/Library/Sounds/Tink.aiff" ;;
+    warning) sound_file="/System/Library/Sounds/Basso.aiff" ;;
+    finish)  sound_file="/System/Library/Sounds/Hero.aiff" ;;
+    *)       return 1 ;;
+  esac
+  afplay "$sound_file" &>/dev/null &
+}
+
+# ------------------------------------------------------------------------------
+# Subcommands
+# ------------------------------------------------------------------------------
+
+_voice_on() {
+  mkdir -p "$_voice_state_dir"
+  export OMACMUX_VOICE=1
+  echo '{"enabled":true,"started":"'"$(date -Iseconds)"'"}' > "$_voice_state_file"
+  _voice_say "Voice mode active"
+  echo -e "\033[32mVoice mode ON\033[0m"
+}
+
+_voice_off() {
+  _voice_say "Voice mode off"
+  export OMACMUX_VOICE=0
+  echo '{"enabled":false}' > "$_voice_state_file"
+  echo -e "\033[2mVoice mode OFF\033[0m"
+}
+
+_voice_status() {
+  if _voice_enabled; then
+    echo -e "\033[32mVoice mode: ON\033[0m"
+  else
+    echo -e "\033[2mVoice mode: OFF\033[0m"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Main dispatch
+# ------------------------------------------------------------------------------
+
+voice() {
+  case "${1:-status}" in
+    on)     _voice_on ;;
+    off)    _voice_off ;;
+    status) _voice_status ;;
+    *)      echo "Usage: voice {on|off|status}" ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Init: restore voice state from previous session
+# ------------------------------------------------------------------------------
+
+_voice_init() {
+  if [[ -f "$_voice_state_file" ]] && [[ "$(jq -r '.enabled // false' "$_voice_state_file" 2>/dev/null)" == "true" ]]; then
+    export OMACMUX_VOICE=1
+  fi
+}
+
+_voice_init
