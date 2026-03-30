@@ -1966,6 +1966,189 @@ _swarm_badge() {
 }
 
 # ------------------------------------------------------------------------------
+# Checkpoint / Restore
+# ------------------------------------------------------------------------------
+
+# Save current swarm state to disk for later restoration
+_swarm_checkpoint() {
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm checkpoint: no active swarm in this window." >&2; return 1; }
+
+  local swarm_id
+  swarm_id=$(_swarm_current_id)
+
+  local ckpt_dir="$swarm_dir/checkpoint"
+  mkdir -p "$ckpt_dir/panes" "$ckpt_dir/agents" "$ckpt_dir/last_messages"
+
+  # Copy swarm and agent metadata
+  cp "$swarm_dir/swarm.json" "$ckpt_dir/swarm.json"
+  local pane_count=0
+  for agent_file in "$swarm_dir/agents/"*.json; do
+    [[ -f "$agent_file" ]] || continue
+    local agent_id pane_id device
+    agent_id=$(jq -r '.id' "$agent_file")
+    pane_id=$(jq -r '.pane_id' "$agent_file")
+    device=$(jq -r '.device' "$agent_file")
+
+    cp "$agent_file" "$ckpt_dir/agents/$agent_id.json"
+
+    # Capture pane scrollback for local agents
+    if [[ "$device" == "local" ]]; then
+      tmux capture-pane -p -S -500 -t "$pane_id" > "$ckpt_dir/panes/$agent_id.txt" 2>/dev/null || true
+    fi
+    (( pane_count++ ))
+  done
+
+  # Save last mailbox message per agent
+  for agent_id in $(_swarm_agent_ids); do
+    local last_msg
+    last_msg=$(command ls -1 "$swarm_dir/mailbox/$agent_id"/*.msg 2>/dev/null | sort | tail -1)
+    [[ -n "$last_msg" && -f "$last_msg" ]] && cp "$last_msg" "$ckpt_dir/last_messages/$agent_id.msg"
+  done
+
+  # Write checkpoint metadata
+  cat > "$ckpt_dir/checkpoint.json" <<EOF
+{
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "swarm_id": "$swarm_id",
+  "window_id": "$(tmux display-message -p '#{window_id}' 2>/dev/null)",
+  "session": "$(tmux display-message -p '#{session_name}' 2>/dev/null)",
+  "pane_count": $pane_count
+}
+EOF
+
+  _voice_say "Checkpoint saved" 2>/dev/null
+  echo "swarm: checkpoint saved ($pane_count agents) → $ckpt_dir"
+}
+
+# Restore a previously checkpointed swarm
+# Usage: swarm restore [swarm_id] [--replay]
+_swarm_restore() {
+  local target_id="" replay=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --replay) replay=true; shift ;;
+      *) target_id="$1"; shift ;;
+    esac
+  done
+
+  [[ -z $TMUX ]] && { echo "swarm restore: requires tmux." >&2; return 1; }
+
+  local state_dir
+  state_dir=$(_swarm_state_dir)
+
+  # If no ID given, use fzf to pick from checkpointed swarms
+  if [[ -z "$target_id" ]]; then
+    local -a candidates
+    for ckpt_file in "$state_dir"/*/checkpoint/checkpoint.json; do
+      [[ -f "$ckpt_file" ]] || continue
+      local sdir sid sname topology ts
+      sdir=$(dirname "$(dirname "$ckpt_file")")
+      sid=$(basename "$sdir")
+      sname=$(jq -r '.name // "unknown"' "$sdir/swarm.json" 2>/dev/null)
+      topology=$(jq -r '.topology // "flat"' "$sdir/swarm.json" 2>/dev/null)
+      ts=$(jq -r '.timestamp // "?"' "$ckpt_file")
+      candidates+=("$sid	$sname	$topology	$ts")
+    done
+
+    (( ${#candidates[@]} == 0 )) && { echo "swarm restore: no checkpointed swarms found." >&2; return 1; }
+
+    local pick
+    pick=$(printf '%s\n' "${candidates[@]}" | \
+      fzf --tmux 70%,50% --header "Restore swarm" \
+          --with-nth=2.. --delimiter=$'\t') || return 0
+    target_id=$(echo "$pick" | cut -f1)
+  fi
+
+  local swarm_dir="$state_dir/$target_id"
+  local ckpt_dir="$swarm_dir/checkpoint"
+  [[ -f "$ckpt_dir/swarm.json" ]] || { echo "swarm restore: no checkpoint found for '$target_id'." >&2; return 1; }
+
+  # Read checkpoint config
+  local topology working_dir name
+  topology=$(jq -r '.topology // "flat"' "$ckpt_dir/swarm.json")
+  working_dir=$(jq -r '.working_dir // "."' "$ckpt_dir/swarm.json")
+  name=$(jq -r '.name // "restored"' "$ckpt_dir/swarm.json")
+  [[ -d "$working_dir" ]] || working_dir="$PWD"
+
+  # Collect agent info from checkpoint
+  local -a agent_ids agent_cmds agent_roles
+  for agent_file in "$ckpt_dir/agents/"*.json; do
+    [[ -f "$agent_file" ]] || continue
+    agent_ids+=($(jq -r '.id' "$agent_file"))
+    agent_cmds+=($(jq -r '.command // "bash"' "$agent_file"))
+    agent_roles+=($(jq -r '.role // "worker"' "$agent_file"))
+  done
+
+  local count=${#agent_ids[@]}
+  (( count == 0 )) && { echo "swarm restore: checkpoint has no agents." >&2; return 1; }
+
+  # Create tiled panes matching the original count
+  local -a panes
+  tmux rename-window -t "$TMUX_PANE" "$name"
+  panes+=("$TMUX_PANE")
+
+  while (( ${#panes[@]} < count )); do
+    local new_pane split_target="${panes[-1]}"
+    new_pane=$(tmux split-window -h -t "$split_target" -c "$working_dir" -P -F '#{pane_id}')
+    panes+=("$new_pane")
+    tmux select-layout -t "${panes[0]}" tiled
+  done
+
+  # Update agent JSON files with new pane IDs and rebuild pane map
+  local pane_map=""
+  for ((i=0; i<count; i++)); do
+    local agent_id="${agent_ids[$i]}" pane_id="${panes[$i]}"
+    local src="$swarm_dir/agents/$agent_id.json"
+    [[ -f "$src" ]] || cp "$ckpt_dir/agents/$agent_id.json" "$src"
+
+    local tmp
+    tmp=$(jq --arg pid "$pane_id" '.pane_id = $pid | .status = "active"' "$src")
+    echo "$tmp" > "$src"
+
+    [[ -n "$pane_map" ]] && pane_map+=","
+    pane_map+="$pane_id:$agent_id"
+  done
+
+  # Update swarm.json with new window info
+  local window_id session
+  window_id=$(tmux display-message -p '#{window_id}')
+  session=$(tmux display-message -p '#{session_name}')
+  local tmp
+  tmp=$(jq --arg wid "$window_id" --arg sess "$session" \
+    '.window_id = $wid | .session = $sess | .status = "running"' "$swarm_dir/swarm.json")
+  echo "$tmp" > "$swarm_dir/swarm.json"
+
+  # Store on tmux window
+  tmux set-option -w @swarm_id "$target_id"
+  tmux set-option -w @swarm_panes "$pane_map"
+
+  # Launch commands in panes
+  for ((i=0; i<count; i++)); do
+    tmux send-keys -t "${panes[$i]}" "${agent_cmds[$i]}" C-m
+  done
+
+  sleep 1
+
+  # Optionally replay last mailbox message to each agent
+  if $replay; then
+    for ((i=0; i<count; i++)); do
+      local agent_id="${agent_ids[$i]}"
+      local last_msg="$ckpt_dir/last_messages/$agent_id.msg"
+      if [[ -f "$last_msg" ]]; then
+        local body
+        body=$(sed '1,/^---$/d' "$last_msg")
+        [[ -n "$body" ]] && _swarm_send_keys "$agent_id" "$body" 2>/dev/null
+      fi
+    done
+  fi
+
+  tmux select-pane -t "${panes[0]}"
+  _voice_say "Swarm restored with $count agents" 2>/dev/null
+  echo "swarm: restored '$name' ($target_id) with $count agents [$topology]"
+}
+
+# ------------------------------------------------------------------------------
 # Help
 # ------------------------------------------------------------------------------
 
@@ -2005,6 +2188,11 @@ OUTPUT & MONITORING
   swarm dashboard            Live-refreshing agent output popup
   swarm hub                  FZF swarm browser with previews
   swarm pick                 FZF agent browser with live pane preview
+
+CHECKPOINT & RESTORE
+  swarm checkpoint          Save swarm state to disk (alias: swarm ckpt)
+  swarm restore [id]        Restore a checkpointed swarm (fzf picker if no id)
+  swarm restore [id] --replay  Restore and replay last message to each agent
 
 EXAMPLES
   swarm star 4 cx                    conductor + 3 workers
@@ -2047,6 +2235,8 @@ swarm() {
     hub)                _swarm_hub "$@" ;;
     pick)               _swarm_pick "$@" ;;
     dashboard|dash)     _swarm_dashboard "$@" ;;
+    checkpoint|ckpt)    _swarm_checkpoint "$@" ;;
+    restore)            _swarm_restore "$@" ;;
     topology|topo)      _swarm_topology ;;
     badge)              _swarm_badge ;;
     dir)                _swarm_dir ;;
