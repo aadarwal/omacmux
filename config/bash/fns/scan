@@ -13,6 +13,9 @@
 #   scan review               # code review pass
 #   scan test                 # test coverage analysis
 #   scan "custom prompt"      # freeform scan mission
+#   scan diff                 # incremental rescan on changed files
+#   scan watch                # auto-scan on commit (post-commit hook)
+#   scan unwatch              # remove post-commit hook
 #   scan status               # check scan progress
 #   scan collect              # aggregate results
 #   scan report               # view final report
@@ -598,6 +601,231 @@ _scan_run() {
   echo -e "\033[36mscan:\033[0m agents working. Use '\033[1mscan status\033[0m' to check, '\033[1mscan collect\033[0m' when done."
 }
 
+# ------------------------------------------------------------------------------
+# Diff helpers
+# ------------------------------------------------------------------------------
+
+_scan_last_sha() {
+  local state_dir
+  state_dir=$(_scan_state_dir)
+  [[ -f "$state_dir/last_scan_sha" ]] && cat "$state_dir/last_scan_sha"
+}
+
+_scan_save_sha() {
+  local state_dir
+  state_dir=$(_scan_state_dir)
+  mkdir -p "$state_dir"
+  git rev-parse HEAD > "$state_dir/last_scan_sha"
+}
+
+_scan_affected_zones() {
+  local changed_files="$1" zones_file="$2"
+  local -a affected=()
+  while IFS= read -r zone; do
+    local zid zpath
+    zid=$(echo "$zone" | jq -r '.id')
+    zpath=$(echo "$zone" | jq -r '.path')
+    if [[ "$zpath" == "root" ]]; then
+      if echo "$changed_files" | grep -qv '/'; then
+        affected+=("$zid")
+      fi
+    elif [[ "$zpath" == "misc" ]]; then
+      affected+=("$zid")
+    elif [[ "$zpath" == *.* ]]; then
+      local ext="${zpath#*.}"
+      if echo "$changed_files" | grep -q "\.${ext}$"; then
+        affected+=("$zid")
+      fi
+    else
+      local dir="${zpath%/}"
+      if echo "$changed_files" | grep -q "^${dir}/"; then
+        affected+=("$zid")
+      fi
+    fi
+  done < <(jq -c '.[]' "$zones_file")
+  printf '%s\n' "${affected[@]}"
+}
+
+# ------------------------------------------------------------------------------
+# Diff: incremental rescan on changed files only
+# ------------------------------------------------------------------------------
+
+_scan_diff() {
+  local state_dir
+  state_dir=$(_scan_state_dir)
+  local last_sha
+  last_sha=$(_scan_last_sha)
+
+  if [[ -z "$last_sha" ]]; then
+    echo -e "\033[36mscan:\033[0m no previous scan found, running full explore"
+    _scan_run explore
+    _scan_save_sha
+    return
+  fi
+
+  local changed_files
+  changed_files=$(git diff --name-only "$last_sha"..HEAD 2>/dev/null)
+  if [[ -z "$changed_files" ]]; then
+    echo -e "\033[36mscan:\033[0m no changes since last scan"
+    return 0
+  fi
+
+  local file_count
+  file_count=$(echo "$changed_files" | wc -l | tr -d ' ')
+
+  local zones_file="$state_dir/zones.json"
+  if [[ ! -f "$zones_file" ]]; then
+    echo -e "\033[36mscan:\033[0m partitioning repository..."
+    _scan_profile
+    _scan_partition
+  fi
+
+  local affected_zones
+  affected_zones=$(_scan_affected_zones "$changed_files" "$zones_file")
+  if [[ -z "$affected_zones" ]]; then
+    echo -e "\033[36mscan:\033[0m changed files don't map to any zone, running full explore"
+    _scan_run explore
+    _scan_save_sha
+    return
+  fi
+
+  local zone_count
+  zone_count=$(echo "$affected_zones" | wc -l | tr -d ' ')
+
+  _voice_say "Scanning $file_count changed files across $zone_count zones"
+  echo -e "\033[36mscan:\033[0m scanning $file_count changed files across $zone_count zones"
+
+  local filtered_zones
+  filtered_zones=$(jq -c --argjson ids "$(printf '%s\n' $affected_zones | jq -R . | jq -s .)" \
+    '[.[] | select(.id as $zid | $ids | index($zid))]' "$zones_file")
+
+  local agent_count=$((zone_count + 1))
+  (( agent_count < 2 )) && agent_count=2
+  (( agent_count > 8 )) && agent_count=8
+
+  [[ -f "$state_dir/profile.md" ]] || _scan_profile
+
+  local scan_id
+  scan_id=$(date +%s | shasum | head -c 8)
+  mkdir -p "$state_dir/scans/$scan_id"
+  printf '{"scan_id":"%s","mode":"diff","agent_count":%d,"zone_count":%d,"started":"%s","status":"running","changed_files":%d}\n' \
+    "$scan_id" "$agent_count" "$zone_count" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$file_count" \
+    > "$state_dir/scan.json"
+
+  swarm star "$agent_count" cxx
+  sleep 5
+
+  local mission
+  mission=$(_scan_mode_explore)
+
+  local zone_list="" worker_cmds=""
+  local worker_n=2
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local zid zpath zfiles zlang
+    zid=$(echo "$line" | jq -r '.id')
+    zpath=$(echo "$line" | jq -r '.path')
+    zfiles=$(echo "$line" | jq -r '.files')
+    zlang=$(echo "$line" | jq -r '.primary_language')
+    zone_list+="  - $zid: $zpath ($zfiles files, $zlang)"$'\n'
+    worker_cmds+="swarm send agent-$worker_n \"INCREMENTAL SCAN: Focus on recently changed files in zone: $zpath ($zfiles files, $zlang). Changed files: $(echo "$changed_files" | grep "^${zpath%/}" | tr '\n' ' '). $mission Write findings to a file.\""$'\n'
+    (( worker_n++ ))
+  done < <(echo "$filtered_zones" | jq -c '.[]')
+
+  local conductor_prompt
+  conductor_prompt="You are the conductor of an INCREMENTAL codebase scan. Only zones with changes are being scanned.
+
+Changed files ($file_count):
+$(echo "$changed_files" | head -50)
+
+$mission
+
+ZONES (affected only):
+$zone_list
+INSTRUCTIONS:
+1. Delegate each zone to a worker:
+$worker_cmds
+2. Monitor progress
+3. When workers finish, write findings to $state_dir/report.md
+
+Start by running the swarm send commands to delegate zones to workers."
+
+  _swarm_send_keys agent-1 "$conductor_prompt"
+
+  {
+    echo ""
+    echo "---"
+    echo "## Incremental Scan: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "Changed files: $file_count | Zones: $zone_count | SHA range: ${last_sha:0:8}..$(git rev-parse --short HEAD)"
+    echo ""
+  } >> "$state_dir/raw_results.md"
+
+  _scan_save_sha
+  echo -e "\033[36mscan:\033[0m $agent_count agents deployed for incremental scan ($file_count files, $zone_count zones)"
+}
+
+# ------------------------------------------------------------------------------
+# Watch: install post-commit hook for automatic scan diff
+# ------------------------------------------------------------------------------
+
+_scan_watch_status() {
+  local hook=".git/hooks/post-commit"
+  [[ -f "$hook" ]] && grep -q '# --- omacmux scan watch begin ---' "$hook"
+}
+
+_scan_watch() {
+  local hook=".git/hooks/post-commit"
+
+  if _scan_watch_status; then
+    echo -e "\033[36mscan:\033[0m watch already enabled"
+    return 0
+  fi
+
+  mkdir -p .git/hooks
+
+  if [[ ! -f "$hook" ]]; then
+    printf '#!/usr/bin/env bash\n' > "$hook"
+  fi
+
+  cat >> "$hook" <<'HOOK'
+# --- omacmux scan watch begin ---
+if command -v scan &>/dev/null || [[ -x "$HOME/.local/bin/swarm" ]]; then
+  source "${OMACMUX_PATH:-$HOME/.local/share/omacmux}/config/bash/fns/scan"
+  _scan_diff &>/dev/null &
+fi
+# --- omacmux scan watch end ---
+HOOK
+
+  chmod +x "$hook"
+  _voice_say "Scan watch enabled"
+  echo -e "\033[36mscan:\033[0m watch enabled (post-commit hook installed)"
+}
+
+_scan_unwatch() {
+  local hook=".git/hooks/post-commit"
+
+  if ! _scan_watch_status; then
+    echo -e "\033[36mscan:\033[0m watch not enabled"
+    return 0
+  fi
+
+  local tmp
+  tmp=$(mktemp)
+  sed '/^# --- omacmux scan watch begin ---$/,/^# --- omacmux scan watch end ---$/d' "$hook" > "$tmp"
+  mv "$tmp" "$hook"
+
+  local content
+  content=$(grep -v '^#!' "$hook" | grep -v '^[[:space:]]*$')
+  if [[ -z "$content" ]]; then
+    rm -f "$hook"
+  else
+    chmod +x "$hook"
+  fi
+
+  _voice_say "Scan watch disabled"
+  echo -e "\033[36mscan:\033[0m watch disabled"
+}
+
 # ==============================================================================
 # Main dispatcher
 # ==============================================================================
@@ -606,8 +834,11 @@ scan() {
   git rev-parse --is-inside-work-tree &>/dev/null || { echo "scan: not a git repo"; return 1; }
   [[ -z "$TMUX" ]] && { echo "scan: requires tmux"; return 1; }
   case "${1:-}" in
-    "") echo "Usage: scan {explore|audit|research|review|test|status|collect|report} or scan \"<prompt>\"" ;;
+    "") echo "Usage: scan {explore|audit|research|review|test|diff|watch|unwatch|status|collect|report} or scan \"<prompt>\"" ;;
     explore|audit|research|review|test) _scan_run "$1" ;;
+    diff) shift; _scan_diff "$@" ;;
+    watch) shift; _scan_watch "$@" ;;
+    unwatch) shift; _scan_unwatch "$@" ;;
     status) _scan_status ;;
     collect) _scan_collect ;;
     report) command -v scanreport &>/dev/null && scanreport || echo "scanreport not available" ;;
