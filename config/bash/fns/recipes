@@ -22,6 +22,17 @@ command -v _voice_sound &>/dev/null || _voice_sound() { :; }
 
 _recipe_dir="$HOME/.local/share/omacmux/recipes"
 
+# Output TSV: name\tdescription for all user recipes
+_recipe_user_list() {
+  [[ -d "$_recipe_dir" ]] && compgen -G "$_recipe_dir/*.sh" &>/dev/null || return 0
+  for f in "$_recipe_dir"/*.sh; do
+    local rname desc
+    rname=$(basename "$f" .sh)
+    desc=$(sed -n 's/^# Description: *//p' "$f" | head -1)
+    printf '%s\t%s\n' "$rname" "${desc:-(no description)}"
+  done
+}
+
 # ------------------------------------------------------------------------------
 # Built-in recipes
 # ------------------------------------------------------------------------------
@@ -101,13 +112,12 @@ _recipe_list() {
 
   echo ""
   echo -e "\033[1mUser recipes:\033[0m"
-  if [[ -d "$_recipe_dir" ]] && compgen -G "$_recipe_dir/*.sh" &>/dev/null; then
-    for f in "$_recipe_dir"/*.sh; do
-      local rname desc
-      rname=$(basename "$f" .sh)
-      desc=$(sed -n 's/^# Description: *//p' "$f" | head -1)
-      echo -e "  \033[36m$rname\033[0m  ${desc:-(no description)}"
-    done
+  local user_recipes
+  user_recipes=$(_recipe_user_list)
+  if [[ -n "$user_recipes" ]]; then
+    while IFS=$'\t' read -r rname desc; do
+      echo -e "  \033[36m$rname\033[0m  $desc"
+    done <<< "$user_recipes"
   else
     echo "  (none)"
   fi
@@ -115,19 +125,12 @@ _recipe_list() {
   # fzf picker if in tmux
   if [[ -n "${TMUX:-}" ]] && command -v fzf &>/dev/null; then
     echo ""
-    local items="research\tStar 4 agents — deep-dive a topic
+    local items
+    items="research\tStar 4 agents — deep-dive a topic
 build\tWorktree 3 agents — build a feature
 fix\tPair — debug and fix an issue
 review\tLaunch review dashboard"
-
-    if [[ -d "$_recipe_dir" ]] && compgen -G "$_recipe_dir/*.sh" &>/dev/null; then
-      for f in "$_recipe_dir"/*.sh; do
-        local rname desc
-        rname=$(basename "$f" .sh)
-        desc=$(sed -n 's/^# Description: *//p' "$f" | head -1)
-        items+=$'\n'"$rname\t${desc:-(no description)}"
-      done
-    fi
+    [[ -n "$user_recipes" ]] && items+=$'\n'"$user_recipes"
 
     local picked
     picked=$(echo -e "$items" | fzf --tmux 50%,40% \
