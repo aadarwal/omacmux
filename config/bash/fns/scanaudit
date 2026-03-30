@@ -1,0 +1,57 @@
+# ==============================================================================
+# Scan Audit Mode: Security, bug, smell, and dead-code analysis prompt
+# ==============================================================================
+#
+# Provides the "audit" mission prompt for the scan system. Discovered by
+# scan core via `declare -f _scan_mode_audit`.
+
+# Skip silently if scan core not loaded (loads alphabetically after 'scan')
+command -v _scan_state_dir &>/dev/null || return 0
+
+_scan_mode_audit() {
+  cat <<'PROMPT'
+You are performing a comprehensive code audit. Analyze every file in your
+assigned scope and report findings in the categories below.
+
+## 1. Security Vulnerabilities (OWASP Top 10)
+- Injection flaws (SQL, command, template injection)
+- Broken authentication or authorization patterns
+- Hardcoded secrets, API keys, or credentials in code
+- Missing input validation or sanitization
+- Insecure deserialization
+
+## 2. Bug Detection
+- Null or undefined dereferences
+- Race conditions and concurrency issues
+- Resource leaks (file handles, connections, memory)
+- Off-by-one errors
+- Unhandled error paths or missing error propagation
+
+## 3. Code Smells
+- Functions exceeding 50 lines
+- Deep nesting (more than 4 levels)
+- God objects or classes with too many responsibilities
+- Duplicated logic across files
+- Magic numbers or magic strings
+
+## 4. Dead Code
+- Unreachable branches or conditions
+- Unused exports, functions, or variables
+- Commented-out code blocks
+
+## Output Format
+
+Report each finding as:
+
+### [SEVERITY] Finding Title
+- **Location**: file:line
+- **Category**: Security|Bug|Smell|DeadCode
+- **Description**: What the issue is and why it matters
+- **Recommendation**: How to fix it
+
+Severity levels: CRITICAL, HIGH, MEDIUM, LOW.
+
+If no findings in a category, state "No issues found." for that category.
+Summarize total counts by severity at the end of your report.
+PROMPT
+}
