@@ -1,0 +1,606 @@
+# ==============================================================================
+# Takeover: Autonomous repo analysis and remediation orchestrator
+# ==============================================================================
+#
+# Launches an AI conductor that autonomously scans, triages, and remediates
+# issues in a codebase. Human stays in the loop for high-risk decisions.
+#
+# Usage:
+#   takeover                      Start autonomous orchestration
+#   takeover stop                 Stop conductor and dashboard
+#   takeover pause                Pause conductor (Ctrl-C)
+#   takeover resume               Resume from last checkpoint
+#   takeover add "task"           Add a task to the queue
+#   takeover approve <id>         Approve a queued item
+#   takeover reject <id> [reason] Reject a queued item
+#   takeover status               Show current state
+
+# ------------------------------------------------------------------------------
+# Constants & stub guards
+# ------------------------------------------------------------------------------
+
+_takeover_base="$HOME/.local/share/omacmux/takeover"
+
+command -v _voice_say &>/dev/null || _voice_say() { :; }
+command -v _voice_sound &>/dev/null || _voice_sound() { :; }
+command -v _takeoverd_render &>/dev/null || _takeoverd_render() { echo "Dashboard not loaded"; }
+command -v tq &>/dev/null || tq() { echo "takeover: taskqueue (tq) not available" >&2; return 1; }
+
+# ------------------------------------------------------------------------------
+# Internal: repo hash (standalone, no dependency on tq)
+# ------------------------------------------------------------------------------
+
+_takeover_repo_hash() {
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  if command -v md5 &>/dev/null; then
+    md5 -q -s "$repo_root" | cut -c1-12
+  else
+    echo -n "$repo_root" | md5sum | cut -c1-12
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Internal: state directory
+# ------------------------------------------------------------------------------
+
+_takeover_state_dir() {
+  local hash
+  hash=$(_takeover_repo_hash) || return 1
+  echo "$_takeover_base/$hash"
+}
+
+# ------------------------------------------------------------------------------
+# Internal: check if running
+# ------------------------------------------------------------------------------
+
+_takeover_is_running() {
+  local state_dir
+  state_dir=$(_takeover_state_dir) || return 1
+  local state_file="$state_dir/state.json"
+
+  [[ -f "$state_file" ]] || return 1
+
+  local info
+  info=$(jq -r '[.status // "stopped", .conductor_pane // ""] | join("\t")' "$state_file" 2>/dev/null) || return 1
+
+  local status pane
+  status="${info%%	*}"
+  pane="${info#*	}"
+
+  [[ "$status" != "running" && "$status" != "paused" ]] && return 1
+  [[ -z "$pane" ]] && return 1
+
+  tmux has-session -t "$pane" 2>/dev/null || return 1
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Internal: launch dashboard pane
+# ------------------------------------------------------------------------------
+
+_takeover_launch_dashboard() {
+  tmux split-window -h -l "35%" -d -P -F '#{pane_id}' \
+    "bash -c 'while true; do clear; if command -v _takeoverd_render &>/dev/null; then _takeoverd_render; else source \"${OMACMUX_PATH:-$HOME/omacmux}/config/bash/fns/takeover_dashboard\" 2>/dev/null && _takeoverd_render; fi; sleep 5; done'"
+}
+
+# ------------------------------------------------------------------------------
+# Internal: write conductor prompt
+# ------------------------------------------------------------------------------
+
+_takeover_write_prompt() {
+  local state_dir="$1"
+  local repo_root="$2"
+  local repo_name="$3"
+  local auto_approve_level="$4"
+
+  cat > "$state_dir/conductor_prompt.md" <<CONDUCTOR_PROMPT
+# Autonomous Conductor — $repo_name
+
+You are the autonomous conductor for **$repo_name**. You run in a loop: scan, triage, act, verify. Your state directory is \`$state_dir\`.
+
+## Status Updates
+
+Write to \`$state_dir/status.txt\` every time you change phase:
+- Line 1: PHASE name (SCANNING, TRIAGING, ACTING, VERIFYING, IDLE)
+- Line 2: What you're currently doing (1 line)
+- Line 3: Iteration number
+
+Example:
+\`\`\`
+echo -e "SCANNING\nRunning explore scan\n1" > $state_dir/status.txt
+\`\`\`
+
+## The Loop
+
+### ITERATION 1 (First Time)
+
+1. Update status: SCANNING
+2. Run: \`scan explore\`
+3. Wait: check \`scan status\` every 30s until complete
+4. Run: \`scan collect\`
+5. Read the report: \`scanreport latest\`
+6. Run: \`scan audit\`
+7. Wait + collect (same pattern)
+8. Run: \`scan test\`
+9. Wait + collect (same pattern)
+
+### TRIAGE
+
+1. Update status: TRIAGING
+2. Read all scan results
+3. For each finding, add to the task queue:
+   \`\`\`
+   tq add --type <type> --priority <N> [--auto-approve] "<title>" "<description>"
+   \`\`\`
+   Types: fix, test, refactor, research, docs
+   Priority: 1 (critical) to 5 (nice-to-have)
+4. Low-risk items (typos, missing imports, simple test additions): use \`--auto-approve\`
+5. Architectural decisions, research directions, large refactors: do NOT auto-approve
+6. Auto-approve level for this session: **$auto_approve_level**
+   - none: never auto-approve anything
+   - low: only auto-approve typos, formatting, trivial fixes
+   - medium: auto-approve simple bug fixes and test additions too
+   - high: auto-approve everything except architectural changes
+
+### ACT
+
+1. Update status: ACTING
+2. Run: \`tq next\` (gets highest priority approved item)
+3. If no items available: wait 30s, run \`tq next\` again. Check if human added/approved anything.
+4. For the item you get, deploy the appropriate swarm:
+   - **Fixes**: \`swarm pair cxx\` — send the fix task to the pair
+   - **Research**: \`swarm star 3 cxx\` — send the research question
+   - **Tests**: \`swarm wt 2 cxx\` — worktree-isolated test writing
+   - **Refactors**: \`swarm wt 2 cxx\` — worktree-isolated refactoring
+   - **Docs**: \`swarm pair cxx\` — writer + reviewer
+5. Record progress: \`tq progress <id> <notes>\`
+6. Enable auto-commit: \`acm on 120\`
+7. Maximum 2 concurrent swarms. Wait for one to finish before starting another.
+
+### VERIFY
+
+1. Update status: VERIFYING
+2. When a swarm completes (check with \`who\` or \`swarm status\`)
+3. Run: \`review\` — AI review of changes
+4. If tests exist: try running the test suite
+5. If good: \`tq done <id>\`
+6. If bad: send feedback to agents, retry once, then mark as error
+
+### SUBSEQUENT ITERATIONS
+
+1. Increment iteration counter
+2. Run: \`scan diff\` (only changed files)
+3. Triage new findings
+4. Continue acting on queue
+5. Repeat
+
+## Human Interaction
+
+Items you add with \`tq\` that are NOT auto-approved will appear as "NEEDS DECISION" on the dashboard. The human will run:
+- \`takeover approve <id>\` — approve the item
+- \`takeover reject <id> [reason]\` — reject with optional reason
+
+Check for newly approved items with \`tq next\` periodically.
+
+If the human runs \`takeover add "something"\`, it appears in the queue for you to pick up.
+
+## Constraints
+
+- **Never** force-push or delete branches without explicit human approval
+- Use worktree swarms (\`swarm wt\`) for code changes (branch isolation)
+- Maximum **2 concurrent swarms** at any time
+- **Always** run \`review\` before marking an item done
+- When running low on context, write a summary to \`$state_dir/checkpoint.md\` including:
+  - Current phase and iteration
+  - Queue state summary
+  - What was accomplished
+  - What's next
+
+## Error Recovery
+
+- If a scan hangs (no progress for 2+ minutes): run \`scan status\`, collect partial results with \`scan collect\`
+- If a swarm fails or hangs: \`swarm kill\`, retry once, then mark the item as error with \`tq done <id> --error "reason"\`
+- If confused or stuck: write a clear status update to status.txt, set phase to IDLE, and wait for human input
+- If you hit a permissions error: do NOT retry, mark as error and move on
+
+## Begin
+
+Start now. Write your first status update, then begin the scan-triage-act-verify loop.
+
+\`\`\`
+echo -e "SCANNING\nStarting initial explore scan\n1" > $state_dir/status.txt
+\`\`\`
+CONDUCTOR_PROMPT
+}
+
+# ------------------------------------------------------------------------------
+# Start
+# ------------------------------------------------------------------------------
+
+_takeover_start() {
+  # Parse args
+  local auto_approve_level="low"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --auto-approve) auto_approve_level="${2:-low}"; shift 2 ;;
+      *) echo "takeover: unknown option '$1'" >&2; return 1 ;;
+    esac
+  done
+
+  # Validate environment
+  git rev-parse --is-inside-work-tree &>/dev/null || {
+    echo -e "\033[31mtakeover: not a git repo\033[0m"; return 1
+  }
+  [[ -z "$TMUX" ]] && {
+    echo -e "\033[31mtakeover: requires tmux\033[0m"; return 1
+  }
+
+  # Check not already running
+  if _takeover_is_running; then
+    echo -e "\033[33mtakeover: already running. Use 'takeover stop' first.\033[0m"
+    return 1
+  fi
+
+  local repo_root repo_name state_dir
+  repo_root=$(git rev-parse --show-toplevel)
+  repo_name=$(basename "$repo_root")
+  state_dir=$(_takeover_state_dir)
+
+  # Create state directory
+  mkdir -p "$state_dir/items"
+
+  # Write initial state.json
+  local now
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  cat > "$state_dir/state.json" <<EOF
+{
+  "repo_root": "$repo_root",
+  "repo_name": "$repo_name",
+  "status": "running",
+  "conductor_pane": "",
+  "dashboard_pane": "",
+  "started": "$now",
+  "phase": "scanning",
+  "iteration": 1,
+  "auto_approve_level": "$auto_approve_level"
+}
+EOF
+
+  # Write conductor prompt
+  _takeover_write_prompt "$state_dir" "$repo_root" "$repo_name" "$auto_approve_level"
+
+  # Write initial status.txt
+  printf 'INITIALIZING\nStarting takeover...\n0\n' > "$state_dir/status.txt"
+
+  # Launch dashboard pane
+  local dash_pane
+  dash_pane=$(_takeover_launch_dashboard)
+  tmux set-option -w @takeover_dashboard "$dash_pane"
+
+  # Launch conductor: start cxx in current pane, then inject prompt
+  local conductor_pane="$TMUX_PANE"
+
+  # Update state with pane IDs
+  local tmp
+  tmp=$(mktemp)
+  jq --arg cp "$conductor_pane" --arg dp "$dash_pane" \
+    '.conductor_pane = $cp | .dashboard_pane = $dp' \
+    "$state_dir/state.json" > "$tmp" && mv "$tmp" "$state_dir/state.json"
+
+  tmux set-option -w @takeover_conductor "$conductor_pane"
+
+  # Launch cxx (claude with full auto permissions)
+  tmux send-keys -t "$conductor_pane" "cxx" C-m
+
+  # Wait for claude to initialize
+  sleep 3
+
+  # Inject conductor prompt
+  local prompt
+  prompt=$(cat "$state_dir/conductor_prompt.md")
+  tmux send-keys -t "$conductor_pane" "$prompt" C-m
+
+  _voice_sound start
+  _voice_say "Takeover started for $repo_name"
+  echo -e "\033[32mtakeover:\033[0m started for \033[1m$repo_name\033[0m (auto-approve: $auto_approve_level)"
+  echo -e "  conductor: $conductor_pane"
+  echo -e "  dashboard: $dash_pane"
+  echo -e "  state:     $state_dir"
+}
+
+# ------------------------------------------------------------------------------
+# Stop
+# ------------------------------------------------------------------------------
+
+_takeover_stop() {
+  local state_dir
+  state_dir=$(_takeover_state_dir 2>/dev/null)
+
+  if [[ -z "$state_dir" || ! -f "$state_dir/state.json" ]]; then
+    echo -e "\033[33mtakeover: not running\033[0m"
+    return 0
+  fi
+
+  # Read pane IDs in one jq call
+  local pane_info
+  pane_info=$(jq -r '[.conductor_pane // "", .dashboard_pane // ""] | join("\t")' "$state_dir/state.json" 2>/dev/null)
+  local conductor_pane dash_pane
+  conductor_pane="${pane_info%%	*}"
+  dash_pane="${pane_info#*	}"
+
+  # Kill conductor pane
+  if [[ -n "$conductor_pane" && "$conductor_pane" != "$TMUX_PANE" ]] && tmux has-session -t "$conductor_pane" 2>/dev/null; then
+    tmux send-keys -t "$conductor_pane" C-c 2>/dev/null
+    sleep 1
+    tmux kill-pane -t "$conductor_pane" 2>/dev/null
+  elif [[ -n "$conductor_pane" && "$conductor_pane" == "$TMUX_PANE" ]]; then
+    tmux send-keys -t "$conductor_pane" C-c 2>/dev/null
+  fi
+
+  # Kill dashboard pane
+  if [[ -n "$dash_pane" ]] && tmux has-session -t "$dash_pane" 2>/dev/null; then
+    tmux kill-pane -t "$dash_pane" 2>/dev/null
+  fi
+
+  # Clean up window options
+  tmux set-option -wu @takeover_conductor 2>/dev/null
+  tmux set-option -wu @takeover_dashboard 2>/dev/null
+
+  # Update state
+  local tmp
+  tmp=$(mktemp)
+  jq '.status = "stopped"' "$state_dir/state.json" > "$tmp" 2>/dev/null \
+    && mv "$tmp" "$state_dir/state.json" \
+    || rm -f "$tmp"
+
+  printf 'STOPPED\nTakeover stopped\n0\n' > "$state_dir/status.txt"
+
+  _voice_say "Takeover stopped"
+  echo -e "\033[32mtakeover:\033[0m stopped"
+}
+
+# ------------------------------------------------------------------------------
+# Pause
+# ------------------------------------------------------------------------------
+
+_takeover_pause() {
+  local state_dir
+  state_dir=$(_takeover_state_dir 2>/dev/null)
+
+  if [[ -z "$state_dir" || ! -f "$state_dir/state.json" ]]; then
+    echo -e "\033[33mtakeover: not running\033[0m"
+    return 0
+  fi
+
+  local status
+  status=$(jq -r '.status // "stopped"' "$state_dir/state.json" 2>/dev/null)
+  [[ "$status" != "running" ]] && {
+    echo -e "\033[33mtakeover: not running (status: $status)\033[0m"
+    return 0
+  }
+
+  # Send Ctrl-C to conductor
+  local conductor_pane
+  conductor_pane=$(jq -r '.conductor_pane // ""' "$state_dir/state.json" 2>/dev/null)
+  if [[ -n "$conductor_pane" ]] && tmux has-session -t "$conductor_pane" 2>/dev/null; then
+    tmux send-keys -t "$conductor_pane" C-c 2>/dev/null
+  fi
+
+  # Update state
+  local tmp
+  tmp=$(mktemp)
+  jq '.status = "paused"' "$state_dir/state.json" > "$tmp" 2>/dev/null \
+    && mv "$tmp" "$state_dir/state.json" \
+    || rm -f "$tmp"
+
+  printf 'PAUSED\nWaiting for resume\n0\n' > "$state_dir/status.txt"
+
+  _voice_say "Takeover paused"
+  echo -e "\033[32mtakeover:\033[0m paused"
+}
+
+# ------------------------------------------------------------------------------
+# Resume
+# ------------------------------------------------------------------------------
+
+_takeover_resume() {
+  local state_dir
+  state_dir=$(_takeover_state_dir 2>/dev/null)
+
+  if [[ -z "$state_dir" || ! -f "$state_dir/state.json" ]]; then
+    echo -e "\033[33mtakeover: no session to resume\033[0m"
+    return 1
+  fi
+
+  local resume_info
+  resume_info=$(jq -r '[
+    .status // "stopped",
+    .repo_name // "unknown",
+    .phase // "idle",
+    (.iteration // 1 | tostring),
+    .dashboard_pane // ""
+  ] | join("\t")' "$state_dir/state.json" 2>/dev/null)
+
+  local status repo_name phase iteration
+  IFS=$'\t' read -r status repo_name phase iteration dash_pane <<< "$resume_info"
+
+  [[ "$status" != "paused" && "$status" != "stopped" ]] && {
+    echo -e "\033[33mtakeover: status is '$status', nothing to resume\033[0m"
+    return 1
+  }
+
+  # Validate environment
+  git rev-parse --is-inside-work-tree &>/dev/null || {
+    echo -e "\033[31mtakeover: not a git repo\033[0m"; return 1
+  }
+  [[ -z "$TMUX" ]] && {
+    echo -e "\033[31mtakeover: requires tmux\033[0m"; return 1
+  }
+
+  # Launch a new dashboard if needed
+  if [[ -z "$dash_pane" ]] || ! tmux has-session -t "$dash_pane" 2>/dev/null; then
+    dash_pane=$(_takeover_launch_dashboard)
+    tmux set-option -w @takeover_dashboard "$dash_pane"
+  fi
+
+  # Use current pane as new conductor
+  local conductor_pane="$TMUX_PANE"
+  tmux set-option -w @takeover_conductor "$conductor_pane"
+
+  # Update state
+  local tmp
+  tmp=$(mktemp)
+  jq --arg cp "$conductor_pane" --arg dp "$dash_pane" \
+    '.status = "running" | .conductor_pane = $cp | .dashboard_pane = $dp' \
+    "$state_dir/state.json" > "$tmp" && mv "$tmp" "$state_dir/state.json"
+
+  printf 'RESUMING\nRestarting conductor\n%s\n' "$iteration" > "$state_dir/status.txt"
+
+  # Build recovery prompt
+  local checkpoint=""
+  [[ -f "$state_dir/checkpoint.md" ]] && checkpoint=$(cat "$state_dir/checkpoint.md")
+
+  local queue_state=""
+  queue_state=$(tq status 2>/dev/null)
+
+  local recovery_prompt
+  recovery_prompt="You are the autonomous conductor for $repo_name, RESUMING from a previous session.
+
+State directory: $state_dir
+Last phase: $phase
+Iteration: $iteration
+
+## Queue State
+$queue_state
+
+## Checkpoint
+$checkpoint
+
+## Instructions
+1. Read $state_dir/conductor_prompt.md for your full instructions
+2. Check current queue with \`tq next\` and \`tq status\`
+3. Resume from where you left off (phase: $phase, iteration: $iteration)
+4. Update status.txt immediately
+
+Continue the scan-triage-act-verify loop."
+
+  # Launch cxx
+  tmux send-keys -t "$conductor_pane" "cxx" C-m
+  sleep 3
+  tmux send-keys -t "$conductor_pane" "$recovery_prompt" C-m
+
+  _voice_sound start
+  _voice_say "Takeover resumed for $repo_name"
+  echo -e "\033[32mtakeover:\033[0m resumed for \033[1m$repo_name\033[0m (phase: $phase, iteration: $iteration)"
+}
+
+# ------------------------------------------------------------------------------
+# Human interaction: add task
+# ------------------------------------------------------------------------------
+
+_takeover_add() {
+  [[ -z "$1" ]] && {
+    echo "Usage: takeover add \"task description\""
+    return 1
+  }
+  tq add --type fix --source human --priority 3 "$@"
+}
+
+# ------------------------------------------------------------------------------
+# Human interaction: approve
+# ------------------------------------------------------------------------------
+
+_takeover_approve() {
+  [[ -z "$1" ]] && {
+    echo "Usage: takeover approve <id>"
+    return 1
+  }
+  tq approve "$1"
+  echo -e "\033[2mtakeover: approved (conductor will pick up on next tq next)\033[0m"
+}
+
+# ------------------------------------------------------------------------------
+# Human interaction: reject
+# ------------------------------------------------------------------------------
+
+_takeover_reject() {
+  [[ -z "$1" ]] && {
+    echo "Usage: takeover reject <id> [reason]"
+    return 1
+  }
+  tq reject "$@"
+}
+
+# ------------------------------------------------------------------------------
+# Status
+# ------------------------------------------------------------------------------
+
+_takeover_status() {
+  local state_dir
+  state_dir=$(_takeover_state_dir 2>/dev/null)
+
+  if [[ -z "$state_dir" || ! -f "$state_dir/state.json" ]]; then
+    echo -e "\033[2mtakeover: no session found\033[0m"
+    return 0
+  fi
+
+  local info
+  info=$(jq -r '[
+    .repo_name // "unknown",
+    .status // "unknown",
+    .phase // "unknown",
+    (.iteration // 0 | tostring),
+    .started // "unknown",
+    .auto_approve_level // "low"
+  ] | join("\t")' "$state_dir/state.json" 2>/dev/null)
+
+  local repo_name status phase iteration started auto_approve
+  IFS=$'\t' read -r repo_name status phase iteration started auto_approve <<< "$info"
+
+  # Status color
+  local status_color="\033[2m"
+  case "$status" in
+    running) status_color="\033[32m" ;;
+    paused)  status_color="\033[33m" ;;
+    stopped) status_color="\033[31m" ;;
+  esac
+
+  # Read live status from status.txt
+  local live_phase="" live_doing="" live_iter=""
+  if [[ -f "$state_dir/status.txt" ]]; then
+    { IFS= read -r live_phase; IFS= read -r live_doing; IFS= read -r live_iter; } < "$state_dir/status.txt"
+  fi
+
+  echo -e "\033[1mTakeover Status\033[0m"
+  echo -e "  Repo:         \033[1m$repo_name\033[0m"
+  echo -e "  Status:       ${status_color}$status\033[0m"
+  echo -e "  Phase:        ${live_phase:-$phase}"
+  echo -e "  Doing:        ${live_doing:-...}"
+  echo -e "  Iteration:    ${live_iter:-$iteration}"
+  echo -e "  Auto-approve: $auto_approve"
+  echo -e "  Started:      $started"
+  echo -e "  State dir:    $state_dir"
+
+  # Show queue summary if tq is available
+  echo ""
+  tq status 2>/dev/null || true
+}
+
+# ------------------------------------------------------------------------------
+# Main dispatcher
+# ------------------------------------------------------------------------------
+
+takeover() {
+  case "${1:-}" in
+    "")        _takeover_start ;;
+    stop)      _takeover_stop ;;
+    pause)     _takeover_pause ;;
+    resume)    _takeover_resume ;;
+    add)       shift; _takeover_add "$@" ;;
+    approve)   shift; _takeover_approve "$@" ;;
+    reject)    shift; _takeover_reject "$@" ;;
+    status|st) _takeover_status ;;
+    *)         echo "takeover: unknown command '$1'" >&2; return 1 ;;
+  esac
+}
