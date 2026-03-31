@@ -1,0 +1,192 @@
+# ==============================================================================
+# Init Project — Generate AGENTS.md with AI-powered repo analysis
+# ==============================================================================
+#
+# Profiles the current repo, sends the profile to Claude for analysis, and
+# generates an AGENTS.md file with architecture summary, recommended scan
+# modes, suggested recipes, and swarm topology guidance.
+#
+# Usage:
+#   omacmux_init              # generate AGENTS.md for current repo
+#   omacmux_init --force      # regenerate even if AGENTS.md exists
+
+# ------------------------------------------------------------------------------
+# Constants & stub guards
+# ------------------------------------------------------------------------------
+
+_init_state_dir="$HOME/.local/share/omacmux/init"
+command -v _voice_say &>/dev/null || _voice_say() { :; }
+command -v _voice_sound &>/dev/null || _voice_sound() { :; }
+command -v _scan_state_dir &>/dev/null || _scan_state_dir() { return 1; }
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+_init_profile_repo() {
+  local output="$1"
+  local git_root
+  git_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  local repo_name
+  repo_name=$(basename "$git_root")
+
+  local file_list
+  file_list=$(mktemp)
+  git ls-files > "$file_list"
+  local total_files
+  total_files=$(wc -l < "$file_list" | tr -d ' ')
+
+  {
+    echo "# Codebase Profile: $repo_name"
+    echo ""
+    echo "- **Remote:** $(git remote get-url origin 2>/dev/null || echo '(none)')"
+    echo "- **Total files:** $total_files"
+    echo ""
+
+    echo "## Languages"
+    echo ""
+    sed -n 's/.*\.//p' "$file_list" | sort | uniq -c | sort -rn | head -20 | while read -r count ext; do
+      printf '%s\n' "- .$ext: $count files"
+    done
+    echo ""
+
+    echo "## Directory Structure"
+    echo '```'
+    find "$git_root" -maxdepth 2 -type d ! -name '.git' ! -path '*/.git/*' | sed "s|$git_root|.|" | sort
+    echo '```'
+    echo ""
+
+    if [[ -f "$git_root/README.md" ]]; then
+      echo "## README (excerpt)"
+      echo ""
+      head -50 "$git_root/README.md" 2>/dev/null
+      echo ""
+    fi
+
+    echo "## Recent Commits"
+    echo '```'
+    git log --oneline -10
+    echo '```'
+  } > "$output"
+
+  rm -f "$file_list"
+  echo -e "\033[36minit:\033[0m profiled $repo_name ($total_files files)"
+}
+
+_init_generate_agents_md() {
+  local profile_path="$1"
+  local output_path="$2"
+  local profile
+  profile=$(cat "$profile_path") || return 1
+
+  local result
+  result=$(claude --print -p "You are an expert at configuring AI agent swarms for codebase analysis.
+
+Given this codebase profile, generate an AGENTS.md file with the following sections:
+
+1. **Architecture Summary** — A concise overview of the repo structure, primary languages, and key components.
+
+2. **Recommended Scan Modes** — Which of these scan modes are most useful for this codebase and why:
+   - explore (architecture & design)
+   - audit (security & quality)
+   - research (deep patterns)
+   - review (code review)
+   - test (test coverage)
+
+3. **Suggested Recipes** — Recommend specific recipe invocations:
+   - \`recipe research \"<topic>\"\` — what topics to research
+   - \`recipe build \"<feature>\"\` — what features to build
+   - \`recipe fix \"<issue>\"\` — what issues to fix
+
+4. **Swarm Topology Guide** — Recommend the best swarm topology for common tasks:
+   - \`swarm star <n> cxx\` — when and with how many agents
+   - \`swarm wt <n> cxx\` — when worktree isolation helps
+   - \`swarm pipe <n> cxx\` — when pipeline stages make sense
+   - \`swarm pair cxx\` — when pair review is best
+
+5. **Quick Start** — 3-5 commands to run first after cloning this repo.
+
+Output raw markdown only. No code fences around the whole document.
+
+CODEBASE PROFILE:
+$profile" 2>/dev/null)
+
+  if [[ -z "$result" ]]; then
+    echo "init: claude returned empty response" >&2
+    return 1
+  fi
+
+  echo "$result" > "$output_path"
+}
+
+# ------------------------------------------------------------------------------
+# Main command
+# ------------------------------------------------------------------------------
+
+omacmux_init() {
+  git rev-parse --is-inside-work-tree &>/dev/null || {
+    echo "init: not a git repo" >&2
+    return 1
+  }
+
+  local git_root
+  git_root=$(git rev-parse --show-toplevel 2>/dev/null)
+  local force=0
+
+  if [[ "${1:-}" == "--force" ]]; then
+    force=1
+  fi
+
+  if [[ -f "$git_root/AGENTS.md" && "$force" -eq 0 ]]; then
+    echo "init: AGENTS.md already exists. Use --force to regenerate."
+    return 0
+  fi
+
+  mkdir -p "$_init_state_dir"
+
+  _voice_say "Initializing project analysis"
+  _voice_sound start
+
+  # Step 1: Profile the repo
+  local profile_path="$_init_state_dir/profile.md"
+
+  echo -e "\033[36minit:\033[0m profiling repository..."
+  if declare -f _scan_profile &>/dev/null; then
+    _scan_profile
+    local scan_state_dir
+    scan_state_dir=$(_scan_state_dir 2>/dev/null)
+    if [[ -f "$scan_state_dir/profile.md" ]]; then
+      cp "$scan_state_dir/profile.md" "$profile_path"
+    else
+      _init_profile_repo "$profile_path" || {
+        echo "init: failed to profile repo" >&2
+        _voice_sound error
+        return 1
+      }
+    fi
+  else
+    _init_profile_repo "$profile_path" || {
+      echo "init: failed to profile repo" >&2
+      _voice_sound error
+      return 1
+    }
+  fi
+
+  _voice_say "Profile complete, generating recommendations"
+
+  # Step 2: Generate AGENTS.md via Claude
+  echo -e "\033[36minit:\033[0m generating AGENTS.md..."
+  local agents_md="$git_root/AGENTS.md"
+
+  _init_generate_agents_md "$profile_path" "$agents_md" || {
+    echo "init: failed to generate AGENTS.md" >&2
+    _voice_sound error
+    return 1
+  }
+
+  _voice_say "AGENTS.md created"
+  _voice_sound done
+
+  echo -e "\033[36minit:\033[0m wrote $agents_md"
+  echo -e "\033[36minit:\033[0m done — review AGENTS.md for swarm recommendations"
+}
