@@ -122,6 +122,7 @@ _swarm_topo_icon() {
     mesh) echo "◆" ;;
     mixed) echo "⊞" ;;
     worktree|wt-star) echo "⌥" ;;
+    tournament) echo "⚔" ;;
     *)    echo "·" ;;
   esac
 }
@@ -2223,10 +2224,436 @@ _swarm_badge() {
 
   case "$topology" in
     star) topo_icon="★" ;; pipe) topo_icon="▸" ;; pair) topo_icon="⇄" ;;
-    mesh) topo_icon="◆" ;; *) topo_icon="·" ;;
+    mesh) topo_icon="◆" ;; tournament) topo_icon="⚔" ;; *) topo_icon="·" ;;
   esac
 
   printf "S:%s %s%s " "$name" "$topo_icon" "$agent_count"
+}
+
+# ------------------------------------------------------------------------------
+# Tournament: multi-round competitive agent topology
+# ------------------------------------------------------------------------------
+
+# Voice helper (no-op if voice system not loaded)
+command -v _voice_say &>/dev/null || _voice_say() { :; }
+command -v _voice_sound &>/dev/null || _voice_sound() { :; }
+
+# NATO name lookup for agent IDs (standalone; see also _an_display_name in agentnames)
+_swarm_tournament_name() {
+  local -a names=(alpha bravo charlie delta echo foxtrot golf hotel)
+  local n="${1#agent-}"
+  (( n >= 1 && n <= ${#names[@]} )) && echo "${names[$((n-1))]}" || echo "$1"
+}
+
+# Sub-dispatcher for tournament commands
+_swarm_tournament() {
+  case "${1:-}" in
+    status|st) shift; _swarm_tournament_status "$@" ;;
+    score)     shift; _swarm_tournament_evaluate "$@" ;;
+    *)         _swarm_tournament_start "$@" ;;
+  esac
+}
+
+# Start a tournament
+# Usage: swarm tournament <n> <cmd> "<task>" [--rounds <r>] [--eval "<criteria>"]
+_swarm_tournament_start() {
+  local count="" cmd="" task="" rounds=2 eval_criteria="code quality, correctness, completeness"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --rounds) rounds="$2"; shift 2 ;;
+      --eval)   eval_criteria="$2"; shift 2 ;;
+      *)
+        if [[ -z "$count" && "$1" =~ ^[0-9]+$ ]]; then count="$1"
+        elif [[ -z "$cmd" ]]; then cmd="$1"
+        elif [[ -z "$task" ]]; then task="$1"
+        else echo "swarm tournament: unexpected arg '$1'"; return 1
+        fi
+        shift ;;
+    esac
+  done
+
+  [[ -z "$count" || -z "$cmd" || -z "$task" ]] && {
+    echo "Usage: swarm tournament <count> <cmd> \"<task>\" [--rounds <r>] [--eval \"<criteria>\"]"
+    return 1
+  }
+  (( count < 2 )) && { echo "swarm tournament: need at least 2 agents."; return 1; }
+  (( rounds < 1 )) && { echo "swarm tournament: need at least 1 round."; return 1; }
+  [[ -z $TMUX ]] && { echo "swarm tournament requires tmux."; return 1; }
+
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "swarm tournament: not in a git repo."; return 1; }
+
+  _voice_say "Starting tournament with $count agents and $rounds rounds"
+
+  # Create worktree swarm for round 1
+  _swarm_wt "$count" "$cmd" --name "tourney-$(_swarm_gen_id)"
+
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm tournament: failed to create swarm."; return 1; }
+
+  # Update topology in swarm metadata
+  local tmp
+  tmp=$(jq '.topology = "tournament"' "$swarm_dir/swarm.json")
+  echo "$tmp" > "$swarm_dir/swarm.json"
+
+  # Build survivor list (all agents start as survivors)
+  local -a survivors
+  for agent_id in $(_swarm_agent_ids "$swarm_dir"); do
+    survivors+=("$agent_id")
+  done
+
+  # Write tournament config
+  mkdir -p "$swarm_dir/tournament"
+  local survivors_json
+  survivors_json=$(printf '%s\n' "${survivors[@]}" | jq -R . | jq -s .)
+
+  jq -n \
+    --arg task "$task" \
+    --argjson rounds "$rounds" \
+    --arg eval_criteria "$eval_criteria" \
+    --argjson total_agents "$count" \
+    --argjson survivors "$survivors_json" \
+    '{
+      task: $task,
+      rounds: $rounds,
+      eval_criteria: $eval_criteria,
+      current_round: 1,
+      total_agents: $total_agents,
+      survivors: $survivors,
+      eliminated: [],
+      winner: null,
+      status: "running"
+    }' > "$swarm_dir/tournament/config.json"
+
+  # Wait for agents to start, then broadcast task
+  sleep 4
+  _swarm_broadcast "$task"
+
+  _swarm_colors
+  printf "\n  ${_sw_bold}${_sw_cyan}TOURNAMENT STARTED${_sw_reset}\n"
+  printf "  Task: %s\n" "$task"
+  printf "  Agents: %d  Rounds: %d\n" "$count" "$rounds"
+  printf "  Criteria: %s\n" "$eval_criteria"
+  printf "\n  ${_sw_dim}Run 'swarm tournament score' when agents finish to evaluate.${_sw_reset}\n\n"
+}
+
+# Evaluate the current round: AI scores all survivor agents
+_swarm_tournament_evaluate() {
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm tournament score: no active swarm."; return 1; }
+
+  [[ -f "$swarm_dir/tournament/config.json" ]] || {
+    echo "swarm tournament score: not a tournament swarm."
+    return 1
+  }
+
+  local task eval_criteria current_round rounds status
+  local _cfg="$swarm_dir/tournament/config.json"
+  task=$(jq -r '.task' "$_cfg")
+  eval_criteria=$(jq -r '.eval_criteria' "$_cfg")
+  current_round=$(jq -r '.current_round' "$_cfg")
+  rounds=$(jq -r '.rounds' "$_cfg")
+  status=$(jq -r '.status' "$_cfg")
+
+  [[ "$status" != "running" ]] && { echo "swarm tournament: tournament is $status."; return 1; }
+
+  _voice_say "Scoring round $current_round"
+
+  # Collect all survivor outputs
+  local -a survivors
+  mapfile -t survivors < <(jq -r '.survivors[]' "$swarm_dir/tournament/config.json")
+
+  local results_text=""
+  for agent_id in "${survivors[@]}"; do
+    local output
+    output=$(_swarm_capture_pane "$agent_id" 2>/dev/null | grep -v '^$' | tail -40)
+    [[ -z "$output" ]] && output="(no visible output)"
+
+    local branch
+    branch=$(jq -r '.branch // "unknown"' "$swarm_dir/agents/$agent_id.json" 2>/dev/null)
+
+    # Check git diff if worktree exists
+    local wt_dir diff_info=""
+    wt_dir=$(jq -r '.worktree // empty' "$swarm_dir/agents/$agent_id.json" 2>/dev/null)
+    if [[ -n "$wt_dir" && -d "$wt_dir" ]]; then
+      diff_info=$(cd "$wt_dir" && git diff --stat HEAD~1 2>/dev/null | tail -5)
+    fi
+
+    results_text+="
+--- $agent_id (branch: $branch) ---
+PANE OUTPUT:
+$output
+"
+    [[ -n "$diff_info" ]] && results_text+="GIT CHANGES:
+$diff_info
+"
+  done
+
+  # Ask Claude to score
+  local prompt="You are judging a coding tournament. The task was: \"$task\"
+
+Evaluation criteria: $eval_criteria
+
+Here are the results from each agent:
+$results_text
+
+Score each agent from 1 to 10 based on the criteria. Return ONLY a JSON array with no other text, like:
+[{\"agent\": \"agent-1\", \"score\": 7, \"notes\": \"reason\"}]"
+
+  _swarm_colors
+  printf "\n  ${_sw_bold}Evaluating round %d...${_sw_reset}\n" "$current_round"
+
+  local raw_response scores_json
+  raw_response=$(claude --print -p "$prompt" 2>/dev/null)
+
+  # Extract JSON array from response (Claude may wrap in markdown fences)
+  scores_json=$(echo "$raw_response" | sed 's/^```json//;s/^```//' | tr '\n' ' ' | grep -oE '\[.*\]')
+
+  if [[ -z "$scores_json" ]] || ! echo "$scores_json" | jq empty 2>/dev/null; then
+    echo "swarm tournament: failed to get valid scores from Claude."
+    mkdir -p "$swarm_dir/tournament/round-$current_round"
+    echo "$raw_response" > "$swarm_dir/tournament/round-${current_round}/raw.txt"
+    echo "Raw response saved to $swarm_dir/tournament/round-${current_round}/raw.txt"
+    return 1
+  fi
+
+  # Save scores
+  mkdir -p "$swarm_dir/tournament/round-$current_round"
+  echo "$scores_json" > "$swarm_dir/tournament/round-$current_round/scores.json"
+
+  # Display leaderboard
+  printf "\n  ${_sw_bold}${_sw_cyan}ROUND %d LEADERBOARD${_sw_reset}\n" "$current_round"
+  echo "  ──────────────────────────────────────────────────"
+
+  local sorted
+  sorted=$(echo "$scores_json" | jq -r 'sort_by(-.score)[] | "\(.agent)\t\(.score)\t\(.notes)"')
+
+  local rank=1
+  local _sw_gold='\033[33m'
+  local _sw_red='\033[31m'
+  local survivor_count=${#survivors[@]}
+  while IFS=$'\t' read -r agent score notes; do
+    [[ -z "$agent" ]] && continue
+    local name color
+    name=$(_swarm_tournament_name "$agent")
+    if (( rank == 1 )); then
+      color="$_sw_gold"
+    elif (( rank <= survivor_count / 2 )); then
+      color="$_sw_green"
+    else
+      color="$_sw_red"
+    fi
+    printf "  ${color}#%d${_sw_reset}  %-12s (%-8s)  ${_sw_bold}%s/10${_sw_reset}  %s\n" \
+      "$rank" "$agent" "$name" "$score" "$notes"
+    (( rank++ ))
+  done <<< "$sorted"
+  echo ""
+
+  # Final round or continue?
+  if (( current_round >= rounds )); then
+    _swarm_tournament_finalize "$swarm_dir" "$scores_json"
+  else
+    _swarm_tournament_prune "$swarm_dir" "$scores_json"
+  fi
+}
+
+# Eliminate bottom half of agents after scoring
+_swarm_tournament_prune() {
+  local swarm_dir="$1"
+  local scores_json="$2"
+
+  local current_round
+  current_round=$(jq -r '.current_round' "$swarm_dir/tournament/config.json")
+
+  # Sort by score, keep top half
+  local total
+  total=$(echo "$scores_json" | jq 'length')
+  local keep=$(( (total + 1) / 2 ))
+  (( keep < 1 )) && keep=1
+
+  local -a keep_agents elim_agents
+  mapfile -t keep_agents < <(echo "$scores_json" | jq -r "sort_by(-.score) | .[0:$keep][] | .agent")
+  mapfile -t elim_agents < <(echo "$scores_json" | jq -r "sort_by(-.score) | .[$keep:][] | .agent")
+
+  _swarm_colors
+  local _sw_red='\033[31m'
+
+  # Kill eliminated agents
+  for agent_id in "${elim_agents[@]}"; do
+    [[ -z "$agent_id" ]] && continue
+    local name pane_id
+    name=$(_swarm_tournament_name "$agent_id")
+    pane_id=$(jq -r '.pane_id' "$swarm_dir/agents/$agent_id.json" 2>/dev/null)
+
+    if [[ -n "$pane_id" && "$pane_id" != "$TMUX_PANE" ]]; then
+      tmux kill-pane -t "$pane_id" 2>/dev/null
+    fi
+
+    local tmp
+    tmp=$(jq '.status = "eliminated"' "$swarm_dir/agents/$agent_id.json")
+    echo "$tmp" > "$swarm_dir/agents/$agent_id.json"
+
+    printf "  ${_sw_red}ELIMINATED${_sw_reset}: %s (%s)\n" "$agent_id" "$name"
+  done
+
+  # Update tournament config
+  local survivors_json elim_json existing_elim merged_elim
+  survivors_json=$(printf '%s\n' "${keep_agents[@]}" | jq -R . | jq -s .)
+  elim_json=$(printf '%s\n' "${elim_agents[@]}" | jq -R . | jq -s .)
+  existing_elim=$(jq '.eliminated' "$swarm_dir/tournament/config.json")
+  merged_elim=$(jq -n --argjson a "$existing_elim" --argjson b "$elim_json" '$a + $b')
+
+  local tmp
+  tmp=$(jq \
+    --argjson survivors "$survivors_json" \
+    --argjson eliminated "$merged_elim" \
+    '.survivors = $survivors | .eliminated = $eliminated' \
+    "$swarm_dir/tournament/config.json")
+  echo "$tmp" > "$swarm_dir/tournament/config.json"
+
+  _voice_say "Eliminated ${#elim_agents[@]} agents. ${#keep_agents[@]} survivors advance to round $((current_round + 1))."
+
+  printf "\n  ${_sw_bold}${#keep_agents[@]} survivors advance to round %d.${_sw_reset}\n\n" "$((current_round + 1))"
+
+  # Advance to next round
+  _swarm_tournament_advance "$swarm_dir" "${keep_agents[@]}"
+}
+
+# Set up next round from surviving agents
+_swarm_tournament_advance() {
+  local swarm_dir="$1"; shift
+  local -a survivors=("$@")
+
+  local current_round task
+  current_round=$(jq -r '.current_round' "$swarm_dir/tournament/config.json")
+  task=$(jq -r '.task' "$swarm_dir/tournament/config.json")
+  local next_round=$((current_round + 1))
+
+  # Update round number
+  local tmp
+  tmp=$(jq --argjson r "$next_round" '.current_round = $r' "$swarm_dir/tournament/config.json")
+  echo "$tmp" > "$swarm_dir/tournament/config.json"
+
+  _voice_say "Starting round $next_round"
+
+  # Broadcast refined prompt to survivors
+  local refined_prompt="TOURNAMENT ROUND $next_round: Build on your previous work. Improve and refine your implementation. $task"
+  for agent_id in "${survivors[@]}"; do
+    _swarm_send_keys "$agent_id" "$refined_prompt" 2>/dev/null
+  done
+
+  _swarm_colors
+  printf "  ${_sw_bold}${_sw_cyan}ROUND %d STARTED${_sw_reset}\n" "$next_round"
+  printf "  Survivors: %s\n" "${survivors[*]}"
+  printf "\n  ${_sw_dim}Run 'swarm tournament score' when agents finish.${_sw_reset}\n\n"
+}
+
+# Finalize tournament: announce winner and offer merge
+_swarm_tournament_finalize() {
+  local swarm_dir="$1"
+  local scores_json="$2"
+
+  _swarm_colors
+  local _sw_gold='\033[33m'
+
+  # Get winner (highest score)
+  local winner winner_score winner_branch winner_name
+  local _top
+  _top=$(echo "$scores_json" | jq -r 'sort_by(-.score) | .[0] | "\(.agent)\t\(.score)"')
+  winner="${_top%%	*}"
+  winner_score="${_top##*	}"
+  winner_name=$(_swarm_tournament_name "$winner")
+  winner_branch=$(jq -r '.branch // "unknown"' "$swarm_dir/agents/$winner.json" 2>/dev/null)
+
+  # Update config
+  local tmp
+  tmp=$(jq --arg w "$winner" '.winner = $w | .status = "complete"' "$swarm_dir/tournament/config.json")
+  echo "$tmp" > "$swarm_dir/tournament/config.json"
+
+  _voice_sound done
+  _voice_say "Tournament complete. $winner_name wins with a score of $winner_score out of 10."
+
+  printf "\n  ${_sw_gold}${_sw_bold}WINNER: %s (%s) with score %s/10${_sw_reset}\n" \
+    "$winner" "$winner_name" "$winner_score"
+  printf "  Branch: %s\n\n" "$winner_branch"
+
+  # Offer merge
+  printf "  Merge winner branch into base? [y/n] "
+  read -r answer
+  if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
+    _swarm_merge "$winner"
+  else
+    printf "  Winner branch preserved at: %s\n" "$winner_branch"
+  fi
+}
+
+# Show tournament bracket / standings
+_swarm_tournament_status() {
+  local swarm_dir
+  swarm_dir=$(_swarm_dir) || { echo "swarm tournament status: no active swarm."; return 1; }
+
+  [[ -f "$swarm_dir/tournament/config.json" ]] || {
+    echo "swarm tournament status: not a tournament swarm."
+    return 1
+  }
+
+  _swarm_colors
+  local _sw_gold='\033[33m'
+  local _sw_red='\033[31m'
+
+  local task rounds current_round status winner total_agents
+  task=$(jq -r '.task' "$swarm_dir/tournament/config.json")
+  rounds=$(jq -r '.rounds' "$swarm_dir/tournament/config.json")
+  current_round=$(jq -r '.current_round' "$swarm_dir/tournament/config.json")
+  status=$(jq -r '.status' "$swarm_dir/tournament/config.json")
+  winner=$(jq -r '.winner // empty' "$swarm_dir/tournament/config.json")
+  total_agents=$(jq -r '.total_agents' "$swarm_dir/tournament/config.json")
+
+  printf "\n  ${_sw_bold}${_sw_cyan}TOURNAMENT STATUS${_sw_reset}\n"
+  echo "  ──────────────────────────────────────────────────"
+  printf "  Task: %s\n" "$task"
+  printf "  Round: %d / %d   Status: %s   Total agents: %d\n\n" \
+    "$current_round" "$rounds" "$status" "$total_agents"
+
+  # Show survivors
+  printf "  ${_sw_bold}ACTIVE${_sw_reset}\n"
+  local -a survivors
+  mapfile -t survivors < <(jq -r '.survivors[]' "$swarm_dir/tournament/config.json")
+  for agent_id in "${survivors[@]}"; do
+    local name
+    name=$(_swarm_tournament_name "$agent_id")
+    if [[ -n "$winner" && "$agent_id" == "$winner" ]]; then
+      printf "  ${_sw_gold}*${_sw_reset} %-12s (%s)  ${_sw_gold}WINNER${_sw_reset}\n" "$agent_id" "$name"
+    else
+      printf "  ${_sw_green}*${_sw_reset} %-12s (%s)\n" "$agent_id" "$name"
+    fi
+  done
+
+  # Show eliminated
+  local -a eliminated
+  mapfile -t eliminated < <(jq -r '.eliminated[]' "$swarm_dir/tournament/config.json" 2>/dev/null)
+  if (( ${#eliminated[@]} > 0 )); then
+    printf "\n  ${_sw_bold}ELIMINATED${_sw_reset}\n"
+    for agent_id in "${eliminated[@]}"; do
+      [[ -z "$agent_id" ]] && continue
+      local name
+      name=$(_swarm_tournament_name "$agent_id")
+      printf "  ${_sw_red}x${_sw_reset} ${_sw_dim}%-12s (%s)${_sw_reset}\n" "$agent_id" "$name"
+    done
+  fi
+
+  # Show scores from past rounds
+  for ((r=1; r<=current_round; r++)); do
+    local scores_file="$swarm_dir/tournament/round-$r/scores.json"
+    [[ -f "$scores_file" ]] || continue
+    printf "\n  ${_sw_bold}ROUND %d SCORES${_sw_reset}\n" "$r"
+    jq -r 'sort_by(-.score)[] | "\(.agent)\t\(.score)/10\t\(.notes)"' "$scores_file" | \
+      while IFS=$'\t' read -r agent score notes; do
+        printf "  %-14s %-8s %s\n" "$agent" "$score" "$notes"
+      done
+  done
+  echo ""
 }
 
 # ------------------------------------------------------------------------------
@@ -2434,6 +2861,12 @@ TOPOLOGIES
   swarm wt <N> <cmd>       Worktree-isolated (one branch per agent)
   swarm wt <cmd> <branches...>          Use existing branches
   swarm mesh <N> <cmd>     ◆ Distributed across Tailscale devices
+  swarm tournament <N> <cmd> "<task>"  Multi-round competitive elimination
+
+TOURNAMENT
+  swarm tournament <N> <cmd> "<task>" [--rounds R] [--eval "<criteria>"]
+  swarm tournament score     Trigger AI scoring of current round
+  swarm tournament status    Show bracket, standings, and scores
 
 GATES (for --gated pipes)
   swarm gate                 Show gate status for all stages
@@ -2491,6 +2924,7 @@ swarm() {
     pair)               _swarm_pair "$@" ;;
     mixed|mix)          _swarm_mixed "$@" ;;
     wt|worktree)        _swarm_wt "$@" ;;
+    tournament|tourney) _swarm_tournament "$@" ;;
     merge)              _swarm_merge "$@" ;;
     conflicts)          _swarm_conflicts "$@" ;;
     mesh)               _swarm_mesh "$@" ;;
