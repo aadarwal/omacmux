@@ -1,0 +1,424 @@
+# ==============================================================================
+# Task Queue: File-based priority queue for takeover orchestration
+# ==============================================================================
+#
+# Manages discovered issues, human decisions, and agent work items using
+# individual JSON files for concurrent access by conductor + dashboard.
+#
+# Usage:
+#   tq add --type fix --priority 3 "Fix bug" "Details here"
+#   tq list                        # fzf picker with preview
+#   tq list --status discovered    # filter by status
+#   tq approve <id>                # approve for execution
+#   tq reject <id> [reason]        # reject with optional reason
+#   tq next                        # get highest priority approved item
+#   tq done <id>                   # mark complete
+#   tq progress <id> <swarm_id>    # mark in-progress
+#   tq status                      # summary counts
+#   tq show <id>                   # pretty-print item
+
+# Stub guards
+command -v _voice_say &>/dev/null || _voice_say() { :; }
+
+# ------------------------------------------------------------------------------
+# Constants and colors
+# ------------------------------------------------------------------------------
+
+_tq_state_base="$HOME/.local/share/omacmux/takeover"
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+_tq_repo_hash() {
+  local root
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  if command -v md5 &>/dev/null; then
+    md5 -q -s "$root" | cut -c1-12
+  else
+    echo -n "$root" | md5sum | cut -c1-12
+  fi
+}
+
+_tq_state_dir() {
+  local hash
+  hash=$(_tq_repo_hash) || { echo "tq: not a git repository" >&2; return 1; }
+  local dir="$_tq_state_base/$hash/items"
+  mkdir -p "$dir"
+  echo "$dir"
+}
+
+_tq_gen_id() {
+  local raw
+  raw=$(date +%s%N 2>/dev/null)
+  if [[ -n "$raw" ]] && command -v shasum &>/dev/null; then
+    echo "$raw$$" | shasum | head -c 6
+  elif command -v md5 &>/dev/null; then
+    md5 -q -s "$raw$$RANDOM" | head -c 6
+  else
+    echo -n "$raw$$RANDOM" | md5sum | head -c 6
+  fi
+}
+
+_tq_read_item() {
+  local id="$1"
+  local dir
+  dir=$(_tq_state_dir) || return 1
+  local file="$dir/$id.json"
+  [[ -f "$file" ]] || { echo "tq: item '$id' not found" >&2; return 1; }
+  cat "$file"
+}
+
+_tq_update_field() {
+  local id="$1" field="$2" value="$3"
+  local dir
+  dir=$(_tq_state_dir) || return 1
+  local file="$dir/$id.json"
+  [[ -f "$file" ]] || { echo "tq: item '$id' not found" >&2; return 1; }
+  local now
+  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local tmp="$file.tmp.$$"
+  jq --arg f "$field" --arg v "$value" --arg now "$now" \
+    '.[$f] = $v | .updated = $now' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+# ------------------------------------------------------------------------------
+# Commands
+# ------------------------------------------------------------------------------
+
+_tq_add() {
+  local type="fix" priority=5 auto_approve=false source="" title="" description=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --type)         type="$2"; shift 2 ;;
+      --priority)     priority="$2"; shift 2 ;;
+      --auto-approve) auto_approve=true; shift ;;
+      --source)       source="$2"; shift 2 ;;
+      -*)             echo "tq: unknown flag '$1'" >&2; return 1 ;;
+      *)
+        if [[ -z "$title" ]]; then
+          title="$1"
+        elif [[ -z "$description" ]]; then
+          description="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$title" ]]; then
+    echo "tq: title required" >&2
+    return 1
+  fi
+
+  local dir
+  dir=$(_tq_state_dir) || return 1
+  local id
+  id=$(_tq_gen_id)
+  local now
+  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local status="discovered"
+  [[ "$auto_approve" == "true" ]] && status="approved"
+
+  jq -n \
+    --arg id "$id" \
+    --arg type "$type" \
+    --argjson priority "$priority" \
+    --arg title "$title" \
+    --arg description "$description" \
+    --arg status "$status" \
+    --arg source "$source" \
+    --argjson auto_approve "$auto_approve" \
+    --arg created "$now" \
+    --arg updated "$now" \
+    '{
+      id: $id,
+      type: $type,
+      priority: $priority,
+      title: $title,
+      description: $description,
+      status: $status,
+      source: $source,
+      auto_approve: $auto_approve,
+      swarm_id: null,
+      branch: null,
+      result: null,
+      error: null,
+      created: $created,
+      updated: $updated
+    }' > "$dir/$id.json"
+
+  _voice_say "Task added: $title"
+  echo "$id"
+}
+
+_tq_list() {
+  local filter_status="" filter_type="" plain=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status) filter_status="$2"; shift 2 ;;
+      --type)   filter_type="$2"; shift 2 ;;
+      --plain)  plain=true; shift ;;
+      *)        echo "tq: unknown arg '$1'" >&2; return 1 ;;
+    esac
+  done
+
+  local dir
+  dir=$(_tq_state_dir) || return 1
+
+  local items=()
+  for f in "$dir"/*.json; do
+    [[ -f "$f" ]] || continue
+    local item
+    item=$(cat "$f")
+    if [[ -n "$filter_status" ]]; then
+      local s
+      s=$(echo "$item" | jq -r '.status // empty')
+      [[ "$s" != "$filter_status" ]] && continue
+    fi
+    if [[ -n "$filter_type" ]]; then
+      local t
+      t=$(echo "$item" | jq -r '.type // empty')
+      [[ "$t" != "$filter_type" ]] && continue
+    fi
+    items+=("$item")
+  done
+
+  if [[ ${#items[@]} -eq 0 ]]; then
+    echo "tq: no items found"
+    return 0
+  fi
+
+  # Sort by priority (ascending)
+  local sorted
+  sorted=$(printf '%s\n' "${items[@]}" | jq -s 'sort_by(.priority)')
+
+  local count
+  count=$(echo "$sorted" | jq 'length')
+
+  # Format rows with a single jq call
+  local rows
+  rows=$(echo "$sorted" | jq -r '.[] | [.id, .type, (.priority|tostring), .status, .title] | @tsv')
+
+  if [[ "$plain" == "true" ]]; then
+    printf "%-8s %-8s %-4s %-14s %s\n" "ID" "TYPE" "PRI" "STATUS" "TITLE"
+    printf "%-8s %-8s %-4s %-14s %s\n" "------" "------" "---" "------------" "-----"
+    while IFS=$'\t' read -r id type pri status title; do
+      printf "%-8s %-8s %-4s %-14s %s\n" "$id" "$type" "$pri" "$status" "$title"
+    done <<< "$rows"
+    return 0
+  fi
+
+  # fzf mode
+  local lines=""
+  while IFS=$'\t' read -r id type pri status title; do
+    lines+="$(printf '%-8s %-8s %-4s %-14s %s' "$id" "$type" "$pri" "$status" "$title")"$'\n'
+  done <<< "$rows"
+
+  local selected
+  selected=$(echo "$lines" | fzf --ansi --tmux 80%,60% \
+    --header "$(printf '%-8s %-8s %-4s %-14s %s' 'ID' 'TYPE' 'PRI' 'STATUS' 'TITLE')" \
+    --preview "id=\$(echo {} | awk '{print \$1}'); tq show \"\$id\"" \
+    --preview-window "right:50%") || return 0
+
+  local sel_id
+  sel_id=$(echo "$selected" | awk '{print $1}')
+  echo "$sel_id"
+}
+
+_tq_approve() {
+  local id="$1"
+  [[ -z "$id" ]] && { echo "tq: id required" >&2; return 1; }
+  _tq_update_field "$id" "status" "approved" || return 1
+  local title
+  title=$(jq -r '.title // empty' "$(_tq_state_dir)/$id.json")
+  _voice_say "Approved: $title"
+  echo "tq: approved $id — $title"
+}
+
+_tq_reject() {
+  local id="$1"
+  [[ -z "$id" ]] && { echo "tq: id required" >&2; return 1; }
+  local reason="${2:-}"
+  local dir
+  dir=$(_tq_state_dir) || return 1
+  local file="$dir/$id.json"
+  [[ -f "$file" ]] || { echo "tq: item '$id' not found" >&2; return 1; }
+  local now
+  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local tmp="$file.tmp.$$"
+  jq --arg reason "$reason" --arg now "$now" \
+    '.status = "rejected" | .updated = $now | if $reason != "" then .error = $reason else . end' \
+    "$file" > "$tmp" && mv "$tmp" "$file"
+  local title
+  title=$(jq -r '.title // empty' "$file")
+  echo "tq: rejected $id — $title"
+}
+
+_tq_next() {
+  local dir
+  dir=$(_tq_state_dir) || return 1
+
+  local best_file="" best_pri=999999
+  for f in "$dir"/*.json; do
+    [[ -f "$f" ]] || continue
+    local status pri
+    status=$(jq -r '.status // empty' "$f")
+    [[ "$status" != "approved" ]] && continue
+    pri=$(jq -r '.priority // 999' "$f")
+    if (( pri < best_pri )); then
+      best_pri=$pri
+      best_file="$f"
+    fi
+  done
+
+  if [[ -z "$best_file" ]]; then
+    return 1
+  fi
+
+  cat "$best_file"
+}
+
+_tq_done() {
+  local id="$1"
+  [[ -z "$id" ]] && { echo "tq: id required" >&2; return 1; }
+  _tq_update_field "$id" "status" "done" || return 1
+  local title
+  title=$(jq -r '.title // empty' "$(_tq_state_dir)/$id.json")
+  _voice_say "Completed: $title"
+  echo "tq: done $id — $title"
+}
+
+_tq_in_progress() {
+  local id="$1" swarm_id="$2" branch="${3:-}"
+  [[ -z "$id" ]] && { echo "tq: id required" >&2; return 1; }
+  [[ -z "$swarm_id" ]] && { echo "tq: swarm_id required" >&2; return 1; }
+  local dir
+  dir=$(_tq_state_dir) || return 1
+  local file="$dir/$id.json"
+  [[ -f "$file" ]] || { echo "tq: item '$id' not found" >&2; return 1; }
+  local now
+  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local tmp="$file.tmp.$$"
+  jq --arg sid "$swarm_id" --arg br "$branch" --arg now "$now" \
+    '.status = "in-progress" | .swarm_id = $sid | .updated = $now | if $br != "" then .branch = $br else . end' \
+    "$file" > "$tmp" && mv "$tmp" "$file"
+  local title
+  title=$(jq -r '.title // empty' "$file")
+  echo "tq: in-progress $id — $title (swarm: $swarm_id)"
+}
+
+_tq_status() {
+  local dir
+  dir=$(_tq_state_dir) || return 1
+
+  # Check if any items exist
+  local files=("$dir"/*.json)
+  [[ -f "${files[0]}" ]] || { echo "tq: empty queue"; return 0; }
+
+  # Count statuses with a single jq invocation over all files
+  local counts
+  counts=$(jq -r '.status // empty' "${files[@]}" | sort | uniq -c | awk '{print $2 "=" $1}')
+
+  local discovered=0 approved=0 in_progress=0 done_count=0 rejected=0 total=0
+  local line
+  while IFS= read -r line; do
+    local s="${line%%=*}" c="${line#*=}"
+    (( total += c ))
+    case "$s" in
+      discovered)  discovered=$c ;;
+      approved)    approved=$c ;;
+      in-progress) in_progress=$c ;;
+      done)        done_count=$c ;;
+      rejected)    rejected=$c ;;
+    esac
+  done <<< "$counts"
+
+  local green='\033[32m' yellow='\033[33m' cyan='\033[36m' red='\033[31m' dim='\033[2m' reset='\033[0m'
+  printf "tq: ${yellow}%d discovered${reset}" "$discovered"
+  printf ", ${cyan}%d approved${reset}" "$approved"
+  printf ", ${green}%d in-progress${reset}" "$in_progress"
+  printf ", ${dim}%d done${reset}" "$done_count"
+  printf ", ${red}%d rejected${reset}" "$rejected"
+  printf " (%d total)\n" "$total"
+}
+
+_tq_show() {
+  local id="$1"
+  [[ -z "$id" ]] && { echo "tq: id required" >&2; return 1; }
+
+  local item
+  item=$(_tq_read_item "$id") || return 1
+
+  local bold='\033[1m' dim='\033[2m' cyan='\033[36m' green='\033[32m'
+  local yellow='\033[33m' red='\033[31m' reset='\033[0m'
+
+  local title type priority status source auto_approve
+  local swarm_id branch result error created updated description
+  # Extract all fields in a single jq call using newline separators
+  {
+    read -r title
+    read -r type
+    read -r priority
+    read -r status
+    read -r source
+    read -r auto_approve
+    read -r swarm_id
+    read -r branch
+    read -r result
+    read -r error
+    read -r created
+    read -r updated
+    read -r description
+  } < <(echo "$item" | jq -r '
+    (.title // ""), (.type // ""), (.priority // 0 | tostring), (.status // ""),
+    (.source // ""), (.auto_approve // false | tostring), (.swarm_id // ""),
+    (.branch // ""), (.result // ""), (.error // ""), (.created // ""),
+    (.updated // ""), (.description // "")')
+
+  local status_color="$dim"
+  case "$status" in
+    discovered)  status_color="$yellow" ;;
+    approved)    status_color="$cyan" ;;
+    in-progress) status_color="$green" ;;
+    done)        status_color="$dim" ;;
+    rejected)    status_color="$red" ;;
+  esac
+
+  printf "${bold}%s${reset} ${dim}[%s]${reset}\n" "$title" "$id"
+  printf "${dim}─────────────────────────${reset}\n"
+  printf "  ${dim}Type:${reset}        %s\n" "$type"
+  printf "  ${dim}Priority:${reset}    %s\n" "$priority"
+  printf "  ${dim}Status:${reset}      ${status_color}%s${reset}\n" "$status"
+  [[ -n "$source" ]] &&       printf "  ${dim}Source:${reset}      %s\n" "$source"
+  [[ -n "$description" ]] &&  printf "  ${dim}Description:${reset} %s\n" "$description"
+  printf "  ${dim}Auto-approve:${reset} %s\n" "$auto_approve"
+  [[ -n "$swarm_id" ]] &&     printf "  ${dim}Swarm:${reset}       %s\n" "$swarm_id"
+  [[ -n "$branch" ]] &&       printf "  ${dim}Branch:${reset}      %s\n" "$branch"
+  [[ -n "$result" ]] &&       printf "  ${dim}Result:${reset}      %s\n" "$result"
+  [[ -n "$error" ]] &&        printf "  ${dim}Error:${reset}       ${red}%s${reset}\n" "$error"
+  printf "  ${dim}Created:${reset}     %s\n" "$created"
+  printf "  ${dim}Updated:${reset}     %s\n" "$updated"
+}
+
+# ------------------------------------------------------------------------------
+# Main dispatch
+# ------------------------------------------------------------------------------
+
+tq() {
+  case "${1:-}" in
+    add)       shift; _tq_add "$@" ;;
+    list|ls)   shift; _tq_list "$@" ;;
+    approve)   shift; _tq_approve "$@" ;;
+    reject)    shift; _tq_reject "$@" ;;
+    next)      _tq_next ;;
+    done)      shift; _tq_done "$@" ;;
+    progress)  shift; _tq_in_progress "$@" ;;
+    status|st) _tq_status ;;
+    show)      shift; _tq_show "$@" ;;
+    "")        _tq_status ;;
+    *)         echo "tq: unknown command '$1'" >&2; return 1 ;;
+  esac
+}
