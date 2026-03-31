@@ -80,7 +80,7 @@ _init_generate_agents_md() {
   profile=$(cat "$profile_path") || return 1
 
   local result
-  result=$(claude --print -p "You are an expert at configuring AI agent swarms for codebase analysis.
+  result=$(claude --print --allowedTools "" -p "You are an expert at configuring AI agent swarms for codebase analysis.
 
 Given this codebase profile, generate an AGENTS.md file with the following sections:
 
