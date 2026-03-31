@@ -491,6 +491,7 @@ mesh() {
     monitor|mon)    _mesh_monitor "$@" ;;
     deploy)         _mesh_deploy "$@" ;;
     broadcast|bc)   _mesh_broadcast "$@" ;;
+    spawn)          _mesh_spawn "$@" ;;
     refresh)        _mesh_force_refresh ;;
     host)
       local hostcmd="${1:-list}"
@@ -668,6 +669,7 @@ Commands:
   detail <device>     Live system info popup (tmux)
   monitor [cmd]       Monitor layout: btop across devices (tmux)
   deploy <ai> [dev]   Deploy AI agent on remote device (tmux)
+  spawn <spec> <cmd>  Spawn agents across devices (e.g. 2 mac + 1 lab cxx)
   broadcast <text>    Send text to all mesh panes (tmux)
   refresh             Force cache refresh
   host add <n> <u@h>  Add a manual SSH host
@@ -1113,4 +1115,285 @@ _mesh_broadcast() {
     echo "mesh: no mesh panes in this window. Use 'mesh monitor' first."
     return 1
   fi
+}
+
+# ------------------------------------------------------------------------------
+# Mesh spawn: distribute agents across Tailscale devices
+# ------------------------------------------------------------------------------
+
+# Parse allocation spec: <count> <device> [+ <count> <device>...] <cmd>
+# Sets: _MESH_ALLOC_COUNTS, _MESH_ALLOC_DEVICES, _MESH_ALLOC_CMD
+_mesh_parse_allocation() {
+  _MESH_ALLOC_COUNTS=()
+  _MESH_ALLOC_DEVICES=()
+  _MESH_ALLOC_CMD=""
+
+  local -a args=("$@")
+  local len=${#args[@]}
+
+  # Edge case: mesh spawn 3 cxx (no device specified)
+  if (( len == 2 )) && [[ "${args[0]}" =~ ^[0-9]+$ ]]; then
+    _MESH_ALLOC_COUNTS=("${args[0]}")
+    _MESH_ALLOC_DEVICES=("")
+    _MESH_ALLOC_CMD="${args[1]}"
+    return 0
+  fi
+
+  # Split by '+' into segments, last non-segment arg is the command
+  # Format: <count> <device> [+ <count> <device>...] <cmd>
+  local -a segments=()
+  local -a current_seg=()
+
+  for arg in "${args[@]}"; do
+    if [[ "$arg" == "+" ]]; then
+      segments+=("$(printf '%s\n' "${current_seg[@]}")")
+      current_seg=()
+    else
+      current_seg+=("$arg")
+    fi
+  done
+
+  # Last segment: the final element is the command
+  # e.g. current_seg = (1 homelab cxx) -> segment=(1 homelab), cmd=cxx
+  local cmd=""
+  if (( ${#current_seg[@]} >= 3 )); then
+    cmd="${current_seg[-1]}"
+    unset 'current_seg[-1]'
+    segments+=("$(printf '%s\n' "${current_seg[@]}")")
+  elif (( ${#current_seg[@]} == 2 )); then
+    cmd="${current_seg[-1]}"
+    segments+=("${current_seg[0]}")
+  elif (( ${#current_seg[@]} == 1 )); then
+    cmd="${current_seg[0]}"
+  fi
+
+  _MESH_ALLOC_CMD="$cmd"
+
+  # Parse each segment into count + device
+  for seg in "${segments[@]}"; do
+    local -a parts
+    IFS=$'\n' read -r -d '' -a parts <<< "$seg" || true
+    if (( ${#parts[@]} >= 2 )); then
+      _MESH_ALLOC_COUNTS+=("${parts[0]}")
+      _MESH_ALLOC_DEVICES+=("${parts[1]}")
+    elif (( ${#parts[@]} == 1 )) && [[ "${parts[0]}" =~ ^[0-9]+$ ]]; then
+      _MESH_ALLOC_COUNTS+=("${parts[0]}")
+      _MESH_ALLOC_DEVICES+=("")
+    fi
+  done
+
+  [[ -z "$_MESH_ALLOC_CMD" ]] && return 1
+  (( ${#_MESH_ALLOC_COUNTS[@]} == 0 )) && return 1
+  return 0
+}
+
+# Spawn agents across mesh devices
+# Usage: mesh spawn <count> <device> [+ <count> <device>...] <cmd>
+# Example: mesh spawn 2 macbook + 1 homelab cxx
+_mesh_spawn() {
+  [[ -z "$TMUX" ]] && { echo "mesh spawn requires tmux."; return 1; }
+  [[ $# -lt 2 ]] && {
+    echo "Usage: mesh spawn <count> <device> [+ <count> <device>...] <cmd>"
+    echo "Example: mesh spawn 2 macbook + 1 homelab cxx"
+    echo "         mesh spawn 3 cxx  (pick device via fzf)"
+    return 1
+  }
+
+  _mesh_parse_allocation "$@" || {
+    echo "mesh spawn: could not parse allocation spec."
+    return 1
+  }
+
+  local cmd="$_MESH_ALLOC_CMD"
+  local -a counts=("${_MESH_ALLOC_COUNTS[@]}")
+  local -a devices=("${_MESH_ALLOC_DEVICES[@]}")
+
+  # Resolve empty device names via fzf
+  for ((i=0; i<${#devices[@]}; i++)); do
+    if [[ -z "${devices[$i]}" ]]; then
+      devices[$i]=$(_mesh_pick) || { echo "mesh spawn: device selection cancelled."; return 1; }
+    fi
+  done
+
+  # Validate all devices exist and are online
+  local device_list
+  device_list=$(_mesh_devices all)
+  for ((i=0; i<${#devices[@]}; i++)); do
+    local dev="${devices[$i]}"
+    if _mesh_is_self "$dev"; then
+      continue
+    fi
+    if ! echo "$device_list" | grep -q "^${dev}"$'\t'; then
+      echo "mesh spawn: device '$dev' not found or offline."
+      return 1
+    fi
+  done
+
+  # Calculate totals
+  local total_agents=0
+  for c in "${counts[@]}"; do (( total_agents += c )); done
+  local num_devices=${#devices[@]}
+
+  command -v _voice_say &>/dev/null && _voice_say "Spawning $total_agents agents across $num_devices devices"
+
+  # Generate swarm state
+  local swarm_id
+  swarm_id=$(date +%s | shasum | head -c 8)
+  local swarm_dir="$HOME/.local/share/omacmux/swarms/$swarm_id"
+  local name="mesh-$swarm_id"
+  local current_dir="$PWD"
+
+  mkdir -p "$swarm_dir"/{agents,mailbox/shared,results}
+
+  local -a all_local_panes=()
+  local pane_map=""
+  local agent_num=0
+  local -a agent_ids=()
+
+  tmux rename-window -t "$TMUX_PANE" "$name"
+
+  for ((i=0; i<${#counts[@]}; i++)); do
+    local count="${counts[$i]}"
+    local dev="${devices[$i]}"
+
+    if _mesh_is_self "$dev"; then
+      # Local panes
+      for ((j=0; j<count; j++)); do
+        (( agent_num++ ))
+        local agent_id="agent-$agent_num"
+        local pane_id
+
+        if (( agent_num == 1 )); then
+          pane_id="$TMUX_PANE"
+        else
+          local split_target="${all_local_panes[-1]:-$TMUX_PANE}"
+          pane_id=$(tmux split-window -h -t "$split_target" -c "$current_dir" -P -F '#{pane_id}')
+          tmux select-layout -t "${all_local_panes[0]:-$TMUX_PANE}" tiled
+        fi
+
+        all_local_panes+=("$pane_id")
+        agent_ids+=("$agent_id")
+        _mesh_spawn_register_agent "$swarm_dir" "$agent_id" "$pane_id" "$cmd" "local"
+
+        [[ -n "$pane_map" ]] && pane_map+=","
+        pane_map+="$pane_id:$agent_id"
+      done
+    else
+      # Remote device
+      local ip suser
+      ip=$(_mesh_device_ip "$dev")
+      suser=$(_mesh_device_user "$dev")
+      local remote_session="omacmux-$swarm_id"
+
+      ssh "$suser@$ip" -- "tmux new-session -d -s '$remote_session' 2>/dev/null || true" 2>/dev/null
+
+      for ((j=0; j<count; j++)); do
+        (( agent_num++ ))
+        local agent_id="agent-$agent_num"
+        local remote_pane_id
+
+        if (( j == 0 )); then
+          remote_pane_id=$(ssh "$suser@$ip" -- \
+            "tmux list-panes -t '$remote_session' -F '#{pane_id}' | head -1" 2>/dev/null)
+        else
+          remote_pane_id=$(ssh "$suser@$ip" -- \
+            "tmux split-window -t '$remote_session' -P -F '#{pane_id}' && tmux select-layout -t '$remote_session' tiled" 2>/dev/null)
+        fi
+
+        # Local proxy pane for visibility
+        local local_pane_id
+        if (( agent_num == 1 )); then
+          local_pane_id="$TMUX_PANE"
+        else
+          local split_target="${all_local_panes[-1]:-$TMUX_PANE}"
+          local_pane_id=$(tmux split-window -h -t "$split_target" -c "$current_dir" -P -F '#{pane_id}')
+          tmux select-layout -t "${all_local_panes[0]:-$TMUX_PANE}" tiled
+        fi
+
+        all_local_panes+=("$local_pane_id")
+        agent_ids+=("$agent_id")
+
+        mkdir -p "$swarm_dir/mailbox/$agent_id"
+        cat > "$swarm_dir/agents/$agent_id.json" <<EOF
+{
+  "id": "$agent_id",
+  "pane_id": "$local_pane_id",
+  "role": "worker",
+  "command": "$cmd",
+  "device": "$dev",
+  "remote_pane": "$remote_pane_id",
+  "remote_session": "$remote_session",
+  "status": "active",
+  "started": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
+        [[ -n "$pane_map" ]] && pane_map+=","
+        pane_map+="$local_pane_id:$agent_id"
+
+        tmux send-keys -t "$local_pane_id" \
+          "ssh $suser@$ip -t 'tmux select-pane -t $remote_pane_id && $cmd'" C-m
+      done
+    fi
+  done
+
+  # Write swarm metadata
+  local window_id session
+  window_id=$(tmux display-message -p '#{window_id}')
+  session=$(tmux display-message -p '#{session_name}')
+
+  local device_summary=""
+  for ((i=0; i<${#counts[@]}; i++)); do
+    [[ -n "$device_summary" ]] && device_summary+=", "
+    device_summary+="${counts[$i]}x${devices[$i]}"
+  done
+
+  cat > "$swarm_dir/swarm.json" <<EOF
+{
+  "id": "$swarm_id",
+  "name": "$name",
+  "topology": "mesh",
+  "hub": "local",
+  "status": "running",
+  "conductor": null,
+  "working_dir": "$current_dir",
+  "window_id": "$window_id",
+  "session": "$session",
+  "device_allocation": "$device_summary",
+  "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "agents": [$(printf '"%s",' "${agent_ids[@]}" | sed 's/,$//')]
+}
+EOF
+
+  tmux set-option -w @swarm_id "$swarm_id"
+  tmux set-option -w @swarm_panes "$pane_map"
+
+  # Launch command in local agent panes
+  for ((i=0; i<${#all_local_panes[@]}; i++)); do
+    local aid="${agent_ids[$i]}"
+    local dev_field
+    dev_field=$(jq -r '.device' "$swarm_dir/agents/$aid.json")
+    [[ "$dev_field" == "local" ]] && tmux send-keys -t "${all_local_panes[$i]}" "$cmd" C-m
+  done
+
+  tmux select-pane -t "${all_local_panes[0]}"
+  echo "mesh spawn: created '$name' ($swarm_id) with $total_agents agents across $num_devices device(s) [$device_summary]"
+}
+
+# Register a local agent in the swarm state directory
+_mesh_spawn_register_agent() {
+  local swarm_dir="$1" agent_id="$2" pane_id="$3" cmd="$4" device="$5"
+  mkdir -p "$swarm_dir/mailbox/$agent_id"
+  cat > "$swarm_dir/agents/$agent_id.json" <<EOF
+{
+  "id": "$agent_id",
+  "pane_id": "$pane_id",
+  "role": "worker",
+  "command": "$cmd",
+  "device": "$device",
+  "remote_pane": null,
+  "status": "active",
+  "started": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
 }
