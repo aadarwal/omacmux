@@ -296,10 +296,9 @@ EOF
   # Wait for claude to initialize
   sleep 3
 
-  # Inject conductor prompt
-  local prompt
-  prompt=$(cat "$state_dir/conductor_prompt.md")
-  tmux send-keys -t "$conductor_pane" "$prompt" C-m
+  # Inject conductor prompt — send a short command that tells Claude to read the full prompt file
+  # (sending the full prompt via send-keys breaks due to tmux buffer limits and shell escaping)
+  tmux send-keys -t "$conductor_pane" "Read $state_dir/conductor_prompt.md and follow those instructions exactly. You are the autonomous conductor. Begin immediately." C-m
 
   _voice_sound start
   _voice_say "Takeover started for $repo_name"
@@ -485,10 +484,15 @@ $checkpoint
 
 Continue the scan-triage-act-verify loop."
 
+  # Write recovery context to a file, then have Claude read it
+  cat > "$state_dir/recovery_prompt.md" <<RECOVERY
+$recovery_prompt
+RECOVERY
+
   # Launch cxx
   tmux send-keys -t "$conductor_pane" "cxx" C-m
   sleep 3
-  tmux send-keys -t "$conductor_pane" "$recovery_prompt" C-m
+  tmux send-keys -t "$conductor_pane" "Read $state_dir/recovery_prompt.md and $state_dir/conductor_prompt.md then resume the autonomous takeover loop from where it left off." C-m
 
   _voice_sound start
   _voice_say "Takeover resumed for $repo_name"
