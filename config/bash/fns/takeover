@@ -278,8 +278,9 @@ EOF
   dash_pane=$(_takeover_launch_dashboard)
   tmux set-option -w @takeover_dashboard "$dash_pane"
 
-  # Launch conductor: start cxx in current pane, then inject prompt
-  local conductor_pane="$TMUX_PANE"
+  # Launch conductor in a NEW pane (not the current one, which may already be running Claude)
+  local conductor_pane
+  conductor_pane=$(tmux split-window -v -l "70%" -c "$repo_root" -d -P -F '#{pane_id}')
 
   # Update state with pane IDs
   local tmp
