@@ -101,8 +101,9 @@ Given this codebase profile, generate an AGENTS.md file with the following secti
 4. **Swarm Topology Guide** — Recommend the best swarm topology for common tasks:
    - \`swarm star <n> cxx\` — when and with how many agents
    - \`swarm wt <n> cxx\` — when worktree isolation helps
-   - \`swarm pipe <n> cxx\` — when pipeline stages make sense
+   - \`swarm pipe <n> cxx [--gated]\` — when pipeline stages make sense, and when to add human approval gates
    - \`swarm pair cxx\` — when pair review is best
+   - \`swarm tournament <n> cxx \"<task>\" --rounds <r> --eval \"<criteria>\"\` — when to use competitive multi-agent tournaments (e.g. multiple approaches to the same problem, choosing the best implementation). Suggest specific tasks and evaluation criteria relevant to this codebase.
 
 5. **Quick Start** — 3-5 commands to run first after cloning this repo.
 
