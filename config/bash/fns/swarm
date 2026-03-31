@@ -1017,6 +1017,250 @@ You MUST actually run these commands. Wait for instructions, then check for the 
   _swarm_send_keys "$agent_id" "$prompt"
 }
 
+# Bootstrap a gated pipeline stage (human-in-the-loop approval between stages)
+_swarm_bootstrap_stage_gated() {
+  local agent_id="$1"
+  local stage_num="$2"
+  local total_stages="$3"
+  local swarm_dir="$4"
+  local swarm_id="$5"
+
+  local results="$swarm_dir/results"
+  local gates="$swarm_dir/gates"
+
+  local prompt="You are stage $stage_num of $total_stages in a gated pipeline. IMPORTANT: You must use your tools to write files, not just respond with text."
+
+  if (( stage_num == 1 )); then
+    prompt+="
+
+You are the FIRST stage. When you receive a task, do the work and then WRITE your output by running:
+  cat > $results/$agent_id.md << 'RESULT'
+  (your full output here)
+  RESULT
+
+After writing your output, signal completion by running:
+  cat > $gates/stage-${stage_num}.json << 'GATE'
+  {\"stage\": $stage_num, \"status\": \"pending\", \"timestamp\": \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"reason\": \"\"}
+  GATE
+
+A human will review your output before the next stage begins. You MUST run these commands to write the files."
+  else
+    local prev=$((stage_num - 1))
+    prompt+="
+
+WORKFLOW: You are in a GATED pipeline. Do NOT start work immediately.
+Wait for a message saying 'Gate approved' before you begin.
+
+When you receive 'Gate approved':
+1. Read the previous stage's output by running: cat $results/agent-$prev.md
+2. Do your work based on that input
+3. WRITE your output by running: cat > $results/$agent_id.md << 'RESULT'
+   (your full output here)
+   RESULT
+4. Signal completion by running:
+   cat > $gates/stage-${stage_num}.json << 'GATE'
+   {\"stage\": $stage_num, \"status\": \"pending\", \"timestamp\": \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\", \"reason\": \"\"}
+   GATE
+
+A human will review before the next stage proceeds. You MUST run these commands."
+  fi
+
+  if (( stage_num == total_stages )); then
+    prompt+=" You are the FINAL stage -- your output is the pipeline's final result."
+  fi
+
+  _swarm_send_keys "$agent_id" "$prompt"
+}
+
+# ------------------------------------------------------------------------------
+# Gate: human-in-the-loop approval for gated pipe stages
+# ------------------------------------------------------------------------------
+
+# Initialize gate state files for a gated pipeline
+_swarm_gate_init() {
+  local swarm_dir="$1"
+  local count="$2"
+
+  mkdir -p "$swarm_dir/gates"
+
+  for ((i=1; i<=count; i++)); do
+    cat > "$swarm_dir/gates/stage-${i}.json" <<EOF
+{
+  "stage": $i,
+  "status": "waiting",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "reason": ""
+}
+EOF
+  done
+}
+
+# Validate current swarm is gated; sets _gate_swarm_dir on success
+_swarm_gate_require() {
+  _gate_swarm_dir=$(_swarm_dir) || { echo "swarm: gate: no active swarm." >&2; return 1; }
+
+  local is_gated
+  is_gated=$(jq -r '.gated // false' "$_gate_swarm_dir/swarm.json")
+  [[ "$is_gated" != "true" ]] && { echo "swarm: gate: current swarm is not gated." >&2; return 1; }
+}
+
+# Find next pending gate stage number; prints it to stdout
+_swarm_gate_find_pending() {
+  local swarm_dir="$1"
+  for gate_file in "$swarm_dir/gates/"stage-*.json; do
+    [[ -f "$gate_file" ]] || continue
+    local status
+    status=$(jq -r '.status' "$gate_file")
+    if [[ "$status" == "pending" ]]; then
+      jq -r '.stage' "$gate_file"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Dispatcher for gate subcommands
+_swarm_gate() {
+  local subcmd="${1:-status}"
+  shift 2>/dev/null
+
+  case "$subcmd" in
+    status|st)   _swarm_gate_status "$@" ;;
+    approve|ok)  _swarm_gate_approve "$@" ;;
+    reject|no)   _swarm_gate_reject "$@" ;;
+    *)
+      echo "swarm: gate: unknown command '$subcmd'" >&2
+      echo "Usage: swarm gate [status|approve [stage]|reject [stage] \"reason\"]" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Show all gate states
+_swarm_gate_status() {
+  local _gate_swarm_dir
+  _swarm_gate_require || return 1
+  local swarm_dir="$_gate_swarm_dir"
+
+  [[ ! -d "$swarm_dir/gates" ]] && { echo "swarm: gate: no gates directory found." >&2; return 1; }
+
+  _swarm_colors
+  local _sw_red='\033[31m'
+
+  printf "\n  ${_sw_bold}PIPELINE GATES${_sw_reset}\n"
+  printf "  ──────────────────────────────────────────────────\n"
+
+  for gate_file in "$swarm_dir/gates/"stage-*.json; do
+    [[ -f "$gate_file" ]] || continue
+    local stage status reason indicator color
+    stage=$(jq -r '.stage' "$gate_file")
+    status=$(jq -r '.status' "$gate_file")
+    reason=$(jq -r '.reason // ""' "$gate_file")
+
+    case "$status" in
+      approved) indicator="${_sw_green}●${_sw_reset}"; color="${_sw_green}" ;;
+      pending)  indicator="${_sw_orange}◉${_sw_reset}"; color="${_sw_orange}" ;;
+      rejected) indicator="${_sw_red}✗${_sw_reset}"; color="${_sw_red}" ;;
+      *)        indicator="${_sw_dim}○${_sw_reset}"; color="${_sw_dim}" ;;
+    esac
+
+    local result_path="$swarm_dir/results/agent-${stage}.md"
+    local result_info=""
+    [[ -f "$result_path" ]] && result_info="results/agent-${stage}.md"
+
+    printf "  %b  Stage %-3s  %b%-10s%b  %s" \
+      "$indicator" "$stage" "$color" "$status" "${_sw_reset}" "$result_info"
+
+    [[ -n "$reason" ]] && printf "  ${_sw_dim}(%s)${_sw_reset}" "$reason"
+    printf "\n"
+  done
+  echo ""
+}
+
+# Approve a pending gate
+# Usage: swarm gate approve [stage]
+_swarm_gate_approve() {
+  local target_stage="$1"
+  local _gate_swarm_dir
+  _swarm_gate_require || return 1
+  local swarm_dir="$_gate_swarm_dir"
+
+  # Find next pending gate if no stage specified
+  if [[ -z "$target_stage" ]]; then
+    target_stage=$(_swarm_gate_find_pending "$swarm_dir") || \
+      { echo "swarm: gate: no pending gates to approve." >&2; return 1; }
+  fi
+
+  local gate_file="$swarm_dir/gates/stage-${target_stage}.json"
+  [[ -f "$gate_file" ]] || { echo "swarm: gate: stage $target_stage not found." >&2; return 1; }
+
+  local current_status
+  current_status=$(jq -r '.status' "$gate_file")
+  [[ "$current_status" != "pending" ]] && { echo "swarm: gate: stage $target_stage is '$current_status', not pending." >&2; return 1; }
+
+  # Update gate to approved
+  local tmp
+  tmp=$(jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.status = "approved" | .timestamp = $ts' "$gate_file")
+  echo "$tmp" > "$gate_file"
+
+  # Send approval message to the next stage agent
+  local total_stages
+  total_stages=$(jq -r '.agents | length' "$swarm_dir/swarm.json")
+  local next_stage=$((target_stage + 1))
+  if (( next_stage <= total_stages )); then
+    _swarm_send_keys "agent-${next_stage}" "Gate approved. You may proceed. Read $swarm_dir/results/agent-${target_stage}.md for the previous stage's output."
+  fi
+
+  _voice_say "Gate approved for stage $target_stage" 2>/dev/null
+  echo "swarm: gate: approved stage $target_stage"
+}
+
+# Reject a gate with feedback
+# Usage: swarm gate reject [stage] "reason"
+_swarm_gate_reject() {
+  local target_stage="" reason=""
+
+  # Parse args: optional numeric stage + reason string
+  if [[ "$1" =~ ^[0-9]+$ ]]; then
+    target_stage="$1"
+    shift
+    reason="$*"
+  else
+    reason="$*"
+  fi
+
+  local _gate_swarm_dir
+  _swarm_gate_require || return 1
+  local swarm_dir="$_gate_swarm_dir"
+
+  # Find next pending gate if no stage specified
+  if [[ -z "$target_stage" ]]; then
+    target_stage=$(_swarm_gate_find_pending "$swarm_dir") || \
+      { echo "swarm: gate: no pending gates to reject." >&2; return 1; }
+  fi
+
+  [[ -z "$reason" ]] && { echo "swarm: gate: rejection requires a reason." >&2; return 1; }
+
+  local gate_file="$swarm_dir/gates/stage-${target_stage}.json"
+  [[ -f "$gate_file" ]] || { echo "swarm: gate: stage $target_stage not found." >&2; return 1; }
+
+  local current_status
+  current_status=$(jq -r '.status' "$gate_file")
+  [[ "$current_status" != "pending" ]] && { echo "swarm: gate: stage $target_stage is '$current_status', not pending." >&2; return 1; }
+
+  # Update gate to rejected with reason
+  local tmp
+  tmp=$(jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg r "$reason" \
+    '.status = "rejected" | .timestamp = $ts | .reason = $r' "$gate_file")
+  echo "$tmp" > "$gate_file"
+
+  # Send rejection feedback to the stage that produced the output
+  _swarm_send_keys "agent-${target_stage}" "Gate rejected: $reason. Please revise your output and rewrite results/agent-${target_stage}.md, then signal completion again."
+
+  _voice_say "Gate rejected for stage $target_stage" 2>/dev/null
+  echo "swarm: gate: rejected stage $target_stage -- $reason"
+}
+
 # Bootstrap a review pair (coder or reviewer)
 _swarm_bootstrap_pair() {
   local agent_id="$1"
@@ -1101,11 +1345,12 @@ _swarm_star() {
 # Create a pipeline topology swarm
 # Usage: swarm pipe <count> <command> [--name NAME]
 _swarm_pipe() {
-  local count="" cmd="" name=""
+  local count="" cmd="" name="" gated=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
+      --gated) gated=true; shift ;;
       *)
         if [[ -z "$count" ]]; then count="$1"
         elif [[ -z "$cmd" ]]; then cmd="$1"
@@ -1114,7 +1359,7 @@ _swarm_pipe() {
     esac
   done
 
-  [[ -z "$count" || -z "$cmd" ]] && { echo "Usage: swarm pipe <count> <command> [--name NAME]"; return 1; }
+  [[ -z "$count" || -z "$cmd" ]] && { echo "Usage: swarm pipe <count> <command> [--name NAME] [--gated]"; return 1; }
   (( count < 2 )) && { echo "swarm pipe: need at least 2 stages."; return 1; }
 
   _swarm_start "$count" "$cmd" ${name:+--name "$name"}
@@ -1124,9 +1369,13 @@ _swarm_pipe() {
   local swarm_id
   swarm_id=$(_swarm_current_id)
 
-  # Update topology and roles
+  # Update topology, roles, and gated flag
   local tmp
-  tmp=$(jq '.topology = "pipe"' "$swarm_dir/swarm.json")
+  if [[ "$gated" == "true" ]]; then
+    tmp=$(jq '.topology = "pipe" | .gated = true' "$swarm_dir/swarm.json")
+  else
+    tmp=$(jq '.topology = "pipe"' "$swarm_dir/swarm.json")
+  fi
   echo "$tmp" > "$swarm_dir/swarm.json"
 
   for ((i=1; i<=count; i++)); do
@@ -1135,13 +1384,27 @@ _swarm_pipe() {
     echo "$tmp" > "$swarm_dir/agents/$agent_id.json"
   done
 
+  # Initialize gate state if gated
+  if [[ "$gated" == "true" ]]; then
+    _swarm_gate_init "$swarm_dir" "$count"
+  fi
+
   sleep 4
 
   for ((i=1; i<=count; i++)); do
-    _swarm_bootstrap_stage "agent-$i" "$i" "$count" "$swarm_dir" "$swarm_id"
+    if [[ "$gated" == "true" ]]; then
+      _swarm_bootstrap_stage_gated "agent-$i" "$i" "$count" "$swarm_dir" "$swarm_id"
+    else
+      _swarm_bootstrap_stage "agent-$i" "$i" "$count" "$swarm_dir" "$swarm_id"
+    fi
   done
 
-  echo "swarm: topology set to pipe ($count stages)"
+  if [[ "$gated" == "true" ]]; then
+    _voice_say "Gated pipeline created with $count stages"
+    echo "swarm: topology set to gated pipe ($count stages)"
+  else
+    echo "swarm: topology set to pipe ($count stages)"
+  fi
 }
 
 # Create a review pair: coder + reviewer
@@ -2165,11 +2428,17 @@ LIFECYCLE
 TOPOLOGIES
   swarm star <N> <cmd>     ★ 1 conductor + N-1 workers (autonomous delegation)
   swarm pipe <N> <cmd>     ▸ N sequential stages (pipeline)
+  swarm pipe <N> <cmd> --gated  Gated pipeline (human approval between stages)
   swarm pair <cmd>         ⇄ Coder + reviewer feedback loop
   swarm mixed <N> <cmd> [<N> <cmd>] ...  Mixed commands (e.g. 1 bash 2 cx)
   swarm wt <N> <cmd>       Worktree-isolated (one branch per agent)
   swarm wt <cmd> <branches...>          Use existing branches
   swarm mesh <N> <cmd>     ◆ Distributed across Tailscale devices
+
+GATES (for --gated pipes)
+  swarm gate                 Show gate status for all stages
+  swarm gate approve [N]     Approve pending gate (default: next pending)
+  swarm gate reject [N] "reason"  Reject with feedback
 
 WORKTREE
   swarm merge [agent|--all|--pr]  Merge agent branches back
@@ -2218,6 +2487,7 @@ swarm() {
     start)              _swarm_start "$@" ;;
     star)               _swarm_star "$@" ;;
     pipe)               _swarm_pipe "$@" ;;
+    gate)               _swarm_gate "$@" ;;
     pair)               _swarm_pair "$@" ;;
     mixed|mix)          _swarm_mixed "$@" ;;
     wt|worktree)        _swarm_wt "$@" ;;
