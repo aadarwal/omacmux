@@ -111,25 +111,42 @@ Example:
 echo -e "SCANNING\nRunning explore scan\n1" > $state_dir/status.txt
 \`\`\`
 
+## Important: Source Functions First
+
+Before running any omacmux commands, you MUST source all function files:
+\`\`\`
+for f in ~/.local/share/omacmux/config/bash/fns/*; do source "\$f" 2>/dev/null; done
+\`\`\`
+Do this once at the start. Verify with: \`type tq && type swarm && echo "ready"\`
+
 ## The Loop
 
-### ITERATION 1 (First Time)
+### DISCOVER (Iteration 1 — First Time)
 
 1. Update status: SCANNING
-2. Run: \`scan explore\`
-3. Wait: check \`scan status\` every 30s until complete
-4. Run: \`scan collect\`
-5. Read the report: \`scanreport latest\`
-6. Run: \`scan audit\`
-7. Wait + collect (same pattern)
-8. Run: \`scan test\`
-9. Wait + collect (same pattern)
+2. **Analyze the repo directly** — do NOT run \`scan explore\` (it spawns agent swarms that take over the tmux layout). Instead:
+   - Read the README: \`cat README.md | head -100\`
+   - List the structure: \`find . -type f -name "*.py" -o -name "*.js" -o -name "*.ts" | head -50\`
+   - Count files by type: \`git ls-files | sed 's/.*\\.//' | sort | uniq -c | sort -rn | head -15\`
+   - Read key files to understand architecture
+   - Look at recent issues: \`git log --oneline -20\`
+3. **Find problems directly**:
+   - Look for TODO/FIXME/HACK comments: \`grep -rn "TODO\\|FIXME\\|HACK" --include="*.py" --include="*.js" | head -30\`
+   - Check for common issues: missing tests, dead code, type errors
+   - Read test files to understand coverage gaps
+   - Check for security issues (hardcoded secrets, unsafe patterns)
+4. Take notes on what you find — you'll triage these into queue items next.
+
+### DISCOVER (Subsequent Iterations)
+
+1. Check what changed: \`git diff --stat HEAD~5\` or \`git log --oneline -5\`
+2. Read changed files to find new issues
+3. Triage new findings
 
 ### TRIAGE
 
 1. Update status: TRIAGING
-2. Read all scan results
-3. For each finding, add to the task queue:
+2. Based on your analysis, add items to the task queue:
    \`\`\`
    tq add --type <type> --priority <N> [--auto-approve] "<title>" "<description>"
    \`\`\`
@@ -146,34 +163,36 @@ echo -e "SCANNING\nRunning explore scan\n1" > $state_dir/status.txt
 ### ACT
 
 1. Update status: ACTING
-2. Run: \`tq next\` (gets highest priority approved item)
-3. If no items available: wait 30s, run \`tq next\` again. Check if human added/approved anything.
-4. For the item you get, deploy the appropriate swarm:
-   - **Fixes**: \`swarm pair cxx\` — send the fix task to the pair
-   - **Research**: \`swarm star 3 cxx\` — send the research question
-   - **Tests**: \`swarm wt 2 cxx\` — worktree-isolated test writing
-   - **Refactors**: \`swarm wt 2 cxx\` — worktree-isolated refactoring
-   - **Docs**: \`swarm pair cxx\` — writer + reviewer
-5. Record progress: \`tq progress <id> <notes>\`
-6. Enable auto-commit: \`acm on 120\`
-7. Maximum 2 concurrent swarms. Wait for one to finish before starting another.
+2. Run: \`tq next\` (gets highest priority approved item). If exit code 1 (none available), wait 30s and try again.
+3. **Do the work yourself directly** — you are a capable AI agent. For most items:
+   - **Fixes**: Read the problematic file, understand the issue, edit it directly. Use git to commit.
+   - **Tests**: Read existing tests for patterns, write new test files directly.
+   - **Docs**: Read the code, write/update documentation directly.
+   - **Refactors**: Make the changes file by file.
+4. For **large or complex items** that benefit from multiple agents, launch a swarm in a **new tmux window**:
+   \`\`\`
+   tmux new-window -n "fix-\$item_id" -c "\$(pwd)"
+   # Then in that window: swarm pair cxx / swarm wt 2 cxx
+   \`\`\`
+   But prefer doing the work yourself when possible — it's faster and avoids layout issues.
+5. Record progress: \`tq progress <id> "working on it"\`
+6. After completing, commit your changes: \`git add <files> && git commit -m "fix: <description>"\`
 
 ### VERIFY
 
 1. Update status: VERIFYING
-2. When a swarm completes (check with \`who\` or \`swarm status\`)
-3. Run: \`review\` — AI review of changes
-4. If tests exist: try running the test suite
-5. If good: \`tq done <id>\`
-6. If bad: send feedback to agents, retry once, then mark as error
+2. Review your own changes: \`git diff HEAD~1\` — does the fix look correct?
+3. If tests exist: try running the test suite (look for pytest, npm test, make test, etc.)
+4. If good: \`tq done <id>\`
+5. If bad: fix the issue, amend the commit, try again
 
-### SUBSEQUENT ITERATIONS
+### LOOP
 
 1. Increment iteration counter
-2. Run: \`scan diff\` (only changed files)
-3. Triage new findings
-4. Continue acting on queue
-5. Repeat
+2. Go back to DISCOVER (subsequent iteration) — check for new issues
+3. Check \`tq next\` for any human-approved items
+4. Continue the cycle
+5. If nothing to do: update status to IDLE, wait 60s, then check again
 
 ## Human Interaction
 
