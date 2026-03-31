@@ -80,8 +80,11 @@ _takeover_is_running() {
 # ------------------------------------------------------------------------------
 
 _takeover_launch_dashboard() {
+  local state_dir
+  state_dir=$(_takeover_state_dir 2>/dev/null)
+  local src="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/config/bash/fns/takeoverdash"
   tmux split-window -h -l "35%" -d -P -F '#{pane_id}' \
-    "bash -c 'while true; do clear; if command -v _takeoverd_render &>/dev/null; then _takeoverd_render; else source \"${OMACMUX_PATH:-$HOME/omacmux}/config/bash/fns/takeover_dashboard\" 2>/dev/null && _takeoverd_render; fi; sleep 5; done'"
+    "bash -c 'source \"$src\" 2>/dev/null; while true; do clear; _takeoverd_render \"$state_dir\"; sleep 5; done'"
 }
 
 # ------------------------------------------------------------------------------
