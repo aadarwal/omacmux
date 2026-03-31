@@ -491,7 +491,7 @@ mesh() {
     monitor|mon)    _mesh_monitor "$@" ;;
     deploy)         _mesh_deploy "$@" ;;
     broadcast|bc)   _mesh_broadcast "$@" ;;
-    spawn)          shift; _mesh_spawn "$@" ;;
+    spawn)          _mesh_spawn "$@" ;;
     refresh)        _mesh_force_refresh ;;
     host)
       local hostcmd="${1:-list}"
