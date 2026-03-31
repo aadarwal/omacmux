@@ -1344,11 +1344,12 @@ _swarm_star() {
 # Create a pipeline topology swarm
 # Usage: swarm pipe <count> <command> [--name NAME]
 _swarm_pipe() {
-  local count="" cmd="" name=""
+  local count="" cmd="" name="" gated=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
+      --gated) gated=true; shift ;;
       *)
         if [[ -z "$count" ]]; then count="$1"
         elif [[ -z "$cmd" ]]; then cmd="$1"
@@ -1357,7 +1358,7 @@ _swarm_pipe() {
     esac
   done
 
-  [[ -z "$count" || -z "$cmd" ]] && { echo "Usage: swarm pipe <count> <command> [--name NAME]"; return 1; }
+  [[ -z "$count" || -z "$cmd" ]] && { echo "Usage: swarm pipe <count> <command> [--name NAME] [--gated]"; return 1; }
   (( count < 2 )) && { echo "swarm pipe: need at least 2 stages."; return 1; }
 
   _swarm_start "$count" "$cmd" ${name:+--name "$name"}
@@ -1367,9 +1368,13 @@ _swarm_pipe() {
   local swarm_id
   swarm_id=$(_swarm_current_id)
 
-  # Update topology and roles
+  # Update topology, roles, and gated flag
   local tmp
-  tmp=$(jq '.topology = "pipe"' "$swarm_dir/swarm.json")
+  if [[ "$gated" == "true" ]]; then
+    tmp=$(jq '.topology = "pipe" | .gated = true' "$swarm_dir/swarm.json")
+  else
+    tmp=$(jq '.topology = "pipe"' "$swarm_dir/swarm.json")
+  fi
   echo "$tmp" > "$swarm_dir/swarm.json"
 
   for ((i=1; i<=count; i++)); do
@@ -1378,13 +1383,27 @@ _swarm_pipe() {
     echo "$tmp" > "$swarm_dir/agents/$agent_id.json"
   done
 
+  # Initialize gate state if gated
+  if [[ "$gated" == "true" ]]; then
+    _swarm_gate_init "$swarm_dir" "$count"
+  fi
+
   sleep 4
 
   for ((i=1; i<=count; i++)); do
-    _swarm_bootstrap_stage "agent-$i" "$i" "$count" "$swarm_dir" "$swarm_id"
+    if [[ "$gated" == "true" ]]; then
+      _swarm_bootstrap_stage_gated "agent-$i" "$i" "$count" "$swarm_dir" "$swarm_id"
+    else
+      _swarm_bootstrap_stage "agent-$i" "$i" "$count" "$swarm_dir" "$swarm_id"
+    fi
   done
 
-  echo "swarm: topology set to pipe ($count stages)"
+  if [[ "$gated" == "true" ]]; then
+    _voice_say "Gated pipeline created with $count stages"
+    echo "swarm: topology set to gated pipe ($count stages)"
+  else
+    echo "swarm: topology set to pipe ($count stages)"
+  fi
 }
 
 # Create a review pair: coder + reviewer
