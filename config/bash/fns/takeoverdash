@@ -1,0 +1,195 @@
+# ==============================================================================
+# Takeover Dashboard: Real-time monitoring of autonomous takeover sessions
+# ==============================================================================
+#
+# Passive dashboard that reads takeover state and renders ANSI output.
+# Designed for a ~35 column tmux sidebar pane.
+#
+# Usage:
+#   takeoverd          Toggle dashboard pane on/off
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+# Stub guards for functions that may be defined in other units
+if ! declare -f _takeover_state_dir &>/dev/null; then
+  _takeover_state_dir() {
+    local hash
+    if command -v md5 &>/dev/null; then
+      hash=$(md5 -q -s "$(git rev-parse --show-toplevel 2>/dev/null)" | cut -c1-12)
+    else
+      hash=$(echo -n "$(git rev-parse --show-toplevel 2>/dev/null)" | md5sum | cut -c1-12)
+    fi
+    local dir="$HOME/.local/share/omacmux/takeover/$hash"
+    [[ -d "$dir" ]] && echo "$dir" || return 1
+  }
+fi
+
+# ------------------------------------------------------------------------------
+# Render
+# ------------------------------------------------------------------------------
+
+_takeoverd_render() {
+  local state_dir="$1"
+  [[ -d "$state_dir" ]] || { printf '\033[2mWaiting for takeover to start...\033[0m\n'; return 0; }
+
+  local reset='\033[0m'
+  local bold='\033[1m'
+  local dim='\033[2m'
+  local cyan='\033[36m'
+  local yellow='\033[33m'
+  local green='\033[32m'
+  local amber='\033[38;5;172m'
+
+  # Read state.json
+  local repo_name="unknown" phase="IDLE" iteration="0"
+  if [[ -f "$state_dir/state.json" ]]; then
+    eval "$(jq -r '@sh "local _repo=\(.repo_name // "unknown") _phase=\(.phase // "IDLE") _iter=\(.iteration // 0)"' "$state_dir/state.json" 2>/dev/null)" 2>/dev/null
+    repo_name="$_repo"
+    phase="$_phase"
+    iteration="$_iter"
+  fi
+
+  # Read status.txt (conductor activity)
+  local activity=""
+  if [[ -f "$state_dir/status.txt" ]]; then
+    activity=$(sed -n '2p' "$state_dir/status.txt" 2>/dev/null)
+  fi
+
+  # Header
+  printf " ${bold}${cyan}TAKEOVER${reset}: ${bold}%s${reset}\n" "$repo_name"
+  printf " ${bold}Phase:${reset} %-10s ${bold}Iter:${reset} %s\n" "$phase" "$iteration"
+  if [[ -n "$activity" ]]; then
+    printf " ${dim}%s${reset}\n" "$activity"
+  fi
+  printf " ${dim}─────────────────────────${reset}\n"
+
+  # Read items
+  local items_dir="$state_dir/items"
+  local -a needs_decision=() in_progress=() done_items=()
+  local total=0 discovered=0 approved=0 active=0 done_count=0 rejected=0
+
+  if [[ -d "$items_dir" ]]; then
+    for f in "$items_dir"/*.json; do
+      [[ -f "$f" ]] || continue
+      ((total++))
+      eval "$(jq -r '@sh "local _s=\(.status) _p=\(.priority) _t=\(.title) _id=\(.id) _type=\(.type) _auto=\(.auto_approve) _sw=\(.swarm_id // "")"' "$f" 2>/dev/null)" 2>/dev/null || continue
+      case "$_s" in
+        discovered|triaged)
+          if [[ "$_auto" != "true" ]]; then
+            needs_decision+=("$_p|$_id|$_type|$_t")
+          fi
+          ((discovered++))
+          ;;
+        approved)
+          ((approved++))
+          ;;
+        in-progress|verifying)
+          in_progress+=("$_id|$_type|$_t|$_sw")
+          ((active++))
+          ;;
+        done)
+          done_items+=("$_t")
+          ((done_count++))
+          ;;
+        rejected)
+          ((rejected++))
+          ;;
+      esac
+    done
+  fi
+
+  # If no items yet, show waiting state
+  if (( total == 0 )); then
+    printf "\n ${dim}No items yet.${reset}\n"
+    printf "\n ${dim}Last: %s${reset}\n" "$(date '+%H:%M:%S')"
+    return 0
+  fi
+
+  # NEEDS DECISION section
+  if (( ${#needs_decision[@]} > 0 )); then
+    # Sort by priority
+    IFS=$'\n' read -r -d '' -a needs_decision < <(printf '%s\n' "${needs_decision[@]}" | sort -t'|' -k1,1n; printf '\0') 2>/dev/null
+    printf "\n ${bold}${yellow}NEEDS DECISION${reset} ${dim}(%d)${reset}\n" "${#needs_decision[@]}"
+    for item in "${needs_decision[@]}"; do
+      IFS='|' read -r _p _id _type _t <<< "$item"
+      local short_id="${_id:0:4}"
+      local short_title="${_t:0:18}"
+      printf "   ${yellow}[%s]${reset} %-9s %s\n" "$short_id" "$_type" "$short_title"
+    done
+  fi
+
+  # IN PROGRESS section
+  if (( ${#in_progress[@]} > 0 )); then
+    printf "\n ${bold}${amber}IN PROGRESS${reset} ${dim}(%d)${reset}\n" "${#in_progress[@]}"
+    for item in "${in_progress[@]}"; do
+      IFS='|' read -r _id _type _t _sw <<< "$item"
+      local short_id="${_id:0:4}"
+      local short_title="${_t:0:18}"
+      printf "   ${amber}[%s]${reset} %-5s %s\n" "$short_id" "$_type" "$short_title"
+      if [[ -n "$_sw" ]]; then
+        printf "          ${dim}%s${reset}\n" "$_sw"
+      fi
+    done
+  fi
+
+  # DONE section
+  if (( done_count > 0 )); then
+    printf "\n ${bold}${green}DONE${reset} ${dim}(%d/%d)${reset}\n" "$done_count" "$total"
+    local show_count=$done_count
+    (( show_count > 5 )) && show_count=5
+    local start=$(( ${#done_items[@]} - show_count ))
+    (( start < 0 )) && start=0
+    for (( i=start; i<${#done_items[@]}; i++ )); do
+      local short_title="${done_items[$i]:0:22}"
+      printf "   ${green}✓${reset} %s\n" "$short_title"
+    done
+  fi
+
+  # Summary line
+  printf "\n ${dim}%d queued  %d active  %d done${reset}\n" "$approved" "$active" "$done_count"
+  if (( rejected > 0 )); then
+    printf " ${dim}%d rejected${reset}\n" "$rejected"
+  fi
+  printf " ${dim}Last: %s${reset}\n" "$(date '+%H:%M:%S')"
+}
+
+# ------------------------------------------------------------------------------
+# Launch
+# ------------------------------------------------------------------------------
+
+_takeoverd_launch() {
+  local state_dir="$1"
+  local src="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/config/bash/fns/takeoverdash"
+
+  local pane_id
+  pane_id=$(tmux split-window -h -l "35%" -d -P -F '#{pane_id}' \
+    "bash -c 'source \"$src\"; while true; do clear; _takeoverd_render \"$state_dir\"; sleep 5; done'")
+
+  echo "$pane_id"
+}
+
+# ------------------------------------------------------------------------------
+# Public: toggle dashboard
+# ------------------------------------------------------------------------------
+
+takeoverd() {
+  local pane_id
+  pane_id=$(tmux show-option -wqv @takeover_dashboard 2>/dev/null)
+
+  if [[ -n "$pane_id" ]] && tmux has-session -t "$pane_id" 2>/dev/null; then
+    tmux kill-pane -t "$pane_id"
+    tmux set-option -wu @takeover_dashboard
+    return 0
+  fi
+
+  # Need state dir
+  local state_dir
+  state_dir="$(_takeover_state_dir 2>/dev/null)"
+  [[ -d "$state_dir" ]] || { echo "takeoverd: no active takeover session" >&2; return 1; }
+
+  local new_pane
+  new_pane=$(_takeoverd_launch "$state_dir")
+  tmux set-option -w @takeover_dashboard "$new_pane"
+}
