@@ -1,0 +1,157 @@
+# ==============================================================================
+# Agent Log: Persistent per-agent conversation history
+# ==============================================================================
+#
+# Logs all messages sent between agents with timestamps.
+# Browse, filter, and tail agent communication history.
+#
+# Usage:
+#   agentlog alpha                  # browse agent-1's log (fzf)
+#   agentlog alpha --tail 20       # last 20 entries
+#   agentlog alpha --since 10m     # entries from last 10 minutes
+#   agentlog alpha --since 1h      # entries from last hour
+
+# Stub guards
+command -v _swarm_current_id &>/dev/null || _swarm_current_id() { return 1; }
+command -v _swarm_state_dir &>/dev/null || _swarm_state_dir() { echo "$HOME/.local/share/omacmux/swarms"; }
+command -v _an_resolve &>/dev/null || _an_resolve() { echo "$1"; }
+command -v _an_display_name &>/dev/null || _an_display_name() { echo "$1"; }
+command -v _voice_say &>/dev/null || _voice_say() { :; }
+
+# ------------------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------------------
+
+_agentlog_dir() {
+  local swarm_id="${1:-$(_swarm_current_id 2>/dev/null)}"
+  [[ -z "$swarm_id" ]] && return 1
+  echo "$(_swarm_state_dir)/$swarm_id/logs"
+}
+
+_agentlog_file() {
+  local swarm_id="$1" agent_id="$2"
+  local dir
+  dir="$(_agentlog_dir "$swarm_id")" || return 1
+  echo "$dir/${agent_id}.log"
+}
+
+# Append a timestamped entry to an agent's log
+# Usage: _agentlog_append <swarm_id> <agent_id> <direction> <message>
+_agentlog_append() {
+  local swarm_id="$1" agent_id="$2" direction="$3" message="$4"
+  [[ -z "$swarm_id" || -z "$agent_id" ]] && return 1
+
+  local dir
+  dir="$(_agentlog_dir "$swarm_id")" || return 1
+  mkdir -p "$dir"
+
+  local ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%S)
+  local tag="${direction^^}"
+
+  echo "[$ts] $tag $agent_id: $message" >> "$dir/${agent_id}.log"
+}
+
+# Parse duration string (10m, 1h, 2d) to seconds
+_agentlog_duration_to_secs() {
+  local dur="$1"
+  local num="${dur%[smhd]}"
+  local unit="${dur: -1}"
+  case "$unit" in
+    s) echo "$num" ;;
+    m) echo $((num * 60)) ;;
+    h) echo $((num * 3600)) ;;
+    d) echo $((num * 86400)) ;;
+    *) echo "$num" ;;
+  esac
+}
+
+# Filter log entries by time
+# Usage: _agentlog_filter <logfile> <duration>
+_agentlog_filter() {
+  local logfile="$1" duration="$2"
+  [[ ! -f "$logfile" ]] && return 1
+
+  local secs
+  secs=$(_agentlog_duration_to_secs "$duration")
+  local cutoff
+  cutoff=$(date -u -v-"${secs}"S +%Y-%m-%dT%H:%M:%S 2>/dev/null \
+    || date -u -d "$secs seconds ago" +%Y-%m-%dT%H:%M:%S 2>/dev/null)
+
+  [[ -z "$cutoff" ]] && { cat "$logfile"; return; }
+
+  while IFS= read -r line; do
+    local ts="${line:1:19}"
+    [[ "$ts" > "$cutoff" || "$ts" == "$cutoff" ]] && echo "$line"
+  done < "$logfile"
+}
+
+# Show last N entries
+# Usage: _agentlog_tail <logfile> <count>
+_agentlog_tail() {
+  local logfile="$1" count="${2:-20}"
+  [[ ! -f "$logfile" ]] && { echo "No log file found."; return 1; }
+  tail -n "$count" "$logfile"
+}
+
+# Browse agent log with fzf
+# Usage: _agentlog_browse <logfile> <display_name>
+_agentlog_browse() {
+  local logfile="$1" name="$2"
+  [[ ! -f "$logfile" ]] && { echo "No log entries for $name."; return 1; }
+
+  _voice_say "Showing log for $name"
+
+  fzf --tmux 80%,60% \
+    --header "Agent Log: $name" \
+    --preview 'echo {}' \
+    --preview-window=down:3:wrap \
+    --no-sort \
+    < "$logfile"
+}
+
+# ------------------------------------------------------------------------------
+# Main dispatcher
+# ------------------------------------------------------------------------------
+
+agentlog() {
+  local agent_name="" since="" tail_n=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since) since="$2"; shift 2 ;;
+      --tail)  tail_n="$2"; shift 2 ;;
+      *)
+        if [[ -z "$agent_name" ]]; then agent_name="$1"
+        else echo "agentlog: unexpected arg '$1'"; return 1
+        fi
+        shift ;;
+    esac
+  done
+
+  [[ -z "$agent_name" ]] && { echo "Usage: agentlog <agent-name> [--since <duration>] [--tail <n>]"; return 1; }
+
+  # Resolve NATO name to agent-N
+  local agent_id
+  agent_id=$(_an_resolve "$agent_name") 2>/dev/null
+  [[ -z "$agent_id" ]] && agent_id="$agent_name"
+
+  local display_name
+  display_name=$(_an_display_name "$agent_id" 2>/dev/null)
+  [[ -z "$display_name" ]] && display_name="$agent_id"
+
+  local swarm_id
+  swarm_id=$(_swarm_current_id 2>/dev/null)
+  [[ -z "$swarm_id" ]] && { echo "agentlog: no active swarm."; return 1; }
+
+  local logfile
+  logfile="$(_agentlog_file "$swarm_id" "$agent_id")"
+
+  if [[ -n "$tail_n" ]]; then
+    _agentlog_tail "$logfile" "$tail_n"
+  elif [[ -n "$since" ]]; then
+    _agentlog_filter "$logfile" "$since"
+  else
+    _agentlog_browse "$logfile" "$display_name"
+  fi
+}
