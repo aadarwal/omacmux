@@ -1,5 +1,5 @@
-# Ignore runtime cache — config files are tracked
+# Ignore runtime data — only example files are tracked
 *
 !.gitignore
-!hosts.json
-!users.json
+!hosts.example.json
+!users.example.json

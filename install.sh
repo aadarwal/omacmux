@@ -69,9 +69,17 @@ for entry in "${OMACMUX_LINKS[@]}"; do
   link_file "$REPO_DIR/${entry%%:*}" "${entry#*:}"
 done
 
-# 7. Set up git identity
+# 7. Copy mesh config templates if not present
+for f in hosts users; do
+  if [[ ! -f "$REPO_DIR/mesh/${f}.json" && -f "$REPO_DIR/mesh/${f}.example.json" ]]; then
+    cp "$REPO_DIR/mesh/${f}.example.json" "$REPO_DIR/mesh/${f}.json"
+    echo "    created mesh/${f}.json from example (edit with your SSH hosts)"
+  fi
+done
+
+# 8. Set up git identity
 echo ""
-echo "==> Git identity setup"
+echo "==> Git identity"
 GIT_CONFIG="$REPO_DIR/config/git/config"
 
 if ! grep -q '^\[user\]' "$GIT_CONFIG" 2>/dev/null; then
@@ -91,7 +99,7 @@ else
   echo "    Git identity already configured."
 fi
 
-# 8. Optionally set Homebrew bash as default shell
+# 9. Optionally set Homebrew bash as default shell
 if [[ -f "$BREW_BASH" && "$SHELL" != "$BREW_BASH" ]]; then
   echo ""
   read -p "==> Set Homebrew bash ($BREW_BASH) as default shell? [y/N] " -n 1 -r
@@ -105,7 +113,7 @@ if [[ -f "$BREW_BASH" && "$SHELL" != "$BREW_BASH" ]]; then
   fi
 fi
 
-# 9. Done
+# 10. Done
 echo ""
 echo "==> omacmux installed successfully!"
 echo ""

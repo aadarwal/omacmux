@@ -1,0 +1,10 @@
+[
+  {
+    "name": "myserver",
+    "host": "myserver.example.edu",
+    "user": "myuser",
+    "port": 22,
+    "os": "linux",
+    "description": "Example SSH host"
+  }
+]
