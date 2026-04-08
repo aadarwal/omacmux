@@ -1,0 +1,101 @@
+# ==============================================================================
+# Desktop — TUI home screen with live widgets
+# ==============================================================================
+
+# Build all desktop widgets
+_desktop_build() {
+  local widgets_dir="$HOME/omacmux/desktop/widgets"
+  local built=0
+
+  for widget in projects news status ports; do
+    local dir="$widgets_dir/$widget"
+    [[ -f "$dir/main.go" ]] || continue
+    echo "Building $widget..."
+    (cd "$dir" && go build -o "$widget" . 2>&1) || { echo "Failed to build $widget"; return 1; }
+    (( built++ ))
+  done
+  echo "Built $built widgets."
+}
+
+# Launch the desktop home screen
+# Usage: desktop [build]
+desktop() {
+  if [[ "$1" == "build" ]]; then
+    _desktop_build
+    return
+  fi
+
+  [[ -z $TMUX ]] && { echo "desktop requires tmux."; return 1; }
+
+  local widgets_dir="$HOME/omacmux/desktop/widgets"
+  local accounts_dir="$HOME/desktop/accounts/portfolio"
+
+  # Build widgets if binaries don't exist
+  for widget in projects news status ports; do
+    if [[ ! -x "$widgets_dir/$widget/$widget" ]]; then
+      echo "Building desktop widgets..."
+      _desktop_build || return 1
+      break
+    fi
+  done
+
+  # Build accounts if needed
+  if [[ ! -x "$accounts_dir/portfolio" && -f "$accounts_dir/main.go" ]]; then
+    echo "Building portfolio..."
+    (cd "$accounts_dir" && go build -o portfolio . 2>&1) || echo "Warning: portfolio build failed"
+  fi
+
+  # Create the desktop window
+  local projects_pane="$TMUX_PANE"
+  tmux rename-window "desktop"
+
+  # ┌─────────────┬─────────────┐
+  # │  PROJECTS   │  STATUS     │
+  # ├────────┬────┴────┬────────┤
+  # │ PORTS  │PORTFOLIO│  NEWS  │
+  # ├────────┬─────────┴────────┤
+  # │ BTOP   │    (reserved)    │
+  # └────────┴──────────────────┘
+
+  # 1. Bottom strip (43% height — btop needs ≥24 rows)
+  local btop_pane
+  btop_pane=$(tmux split-window -v -p 43 -t "$projects_pane" -P -F '#{pane_id}')
+
+  # Split bottom: btop left (~34% ≈ 80 cols) | reserved right
+  local reserved_pane
+  reserved_pane=$(tmux split-window -h -p 66 -t "$btop_pane" -P -F '#{pane_id}')
+
+  # 2. Split remaining top area into top row and middle row (50/50)
+  local ports_pane
+  ports_pane=$(tmux split-window -v -p 50 -t "$projects_pane" -P -F '#{pane_id}')
+
+  # 3. Top row: PROJECTS (left 50%) | STATUS (right 50%)
+  local status_pane
+  status_pane=$(tmux split-window -h -p 50 -t "$projects_pane" -P -F '#{pane_id}')
+
+  # 4. Middle row: PORTS (left 33%) | rest (right 67%)
+  local portfolio_pane
+  portfolio_pane=$(tmux split-window -h -p 67 -t "$ports_pane" -P -F '#{pane_id}')
+
+  # 5. Split rest into PORTFOLIO (left 50%) | NEWS (right 50%)
+  local news_pane
+  news_pane=$(tmux split-window -h -p 50 -t "$portfolio_pane" -P -F '#{pane_id}')
+
+  # Launch widgets in each pane
+  tmux send-keys -t "$projects_pane" "$widgets_dir/projects/projects" C-m
+  tmux send-keys -t "$status_pane" "$widgets_dir/status/status" C-m
+  tmux send-keys -t "$ports_pane" "$widgets_dir/ports/ports" C-m
+  tmux send-keys -t "$news_pane" "$widgets_dir/news/news" C-m
+  tmux send-keys -t "$btop_pane" "btop" C-m
+
+  # Portfolio — use compiled binary or go run
+  if [[ -x "$accounts_dir/portfolio" ]]; then
+    tmux send-keys -t "$portfolio_pane" "$accounts_dir/portfolio" C-m
+  elif [[ -f "$accounts_dir/main.go" ]]; then
+    tmux send-keys -t "$portfolio_pane" "cd '$accounts_dir' && go run ." C-m
+  else
+    tmux send-keys -t "$portfolio_pane" "echo 'Portfolio widget not found at $accounts_dir'" C-m
+  fi
+
+  tmux select-pane -t "$projects_pane"
+}
