@@ -34,10 +34,14 @@ var (
 	dimStyle      = lipgloss.NewStyle().Foreground(dim)
 	footerStyle   = lipgloss.NewStyle().Foreground(dim)
 	greenStyle    = lipgloss.NewStyle().Foreground(green)
+	redStyle      = lipgloss.NewStyle().Foreground(red)
 	orangeStyle   = lipgloss.NewStyle().Foreground(orange)
 	cyanStyle     = lipgloss.NewStyle().Foreground(cyan)
 	sectionStyle  = lipgloss.NewStyle().Foreground(orange).Bold(true)
 	errStyle      = lipgloss.NewStyle().Foreground(red)
+	labelStyle    = lipgloss.NewStyle().Foreground(dim).Width(12)
+	valueStyle    = lipgloss.NewStyle().Foreground(white)
+	warnStyle     = lipgloss.NewStyle().Foreground(red).Bold(true)
 
 	_ = normalStyle
 	_ = errStyle
@@ -98,6 +102,14 @@ type Port struct {
 	Category string
 }
 
+type viewMode int
+
+const (
+	modeList viewMode = iota
+	modeConfirmKill
+	modeDetail
+)
+
 // ---------------------------------------------------------------------------
 // Tea messages
 // ---------------------------------------------------------------------------
@@ -108,6 +120,22 @@ type portsMsg struct {
 	ports []Port
 	err   error
 }
+
+type detailMsg struct {
+	command string
+	user    string
+	cwd     string
+}
+
+type killResultMsg struct {
+	portNum int
+	process string
+	err     error
+}
+
+type killRefreshMsg struct{}
+type copyDoneMsg struct{}
+type flashClearMsg struct{}
 
 // ---------------------------------------------------------------------------
 // Model
@@ -121,6 +149,16 @@ type model struct {
 	err     error
 	width   int
 	height  int
+
+	mode      viewMode
+	forceKill bool
+	flash     string
+
+	// detail view
+	detailPort Port
+	detailCmd  string
+	detailUser string
+	detailCwd  string
 }
 
 func initialModel() model {
@@ -196,6 +234,52 @@ func scheduleTick() tea.Cmd {
 	})
 }
 
+func fetchDetail(pid string) tea.Cmd {
+	return func() tea.Msg {
+		command := ""
+		if out, err := exec.Command("ps", "-p", pid, "-o", "command=").Output(); err == nil {
+			command = strings.TrimSpace(string(out))
+		}
+		user := ""
+		if out, err := exec.Command("ps", "-p", pid, "-o", "user=").Output(); err == nil {
+			user = strings.TrimSpace(string(out))
+		}
+		cwd := ""
+		if out, err := exec.Command("bash", "-c",
+			fmt.Sprintf("lsof -a -p %s -d cwd -Fn 2>/dev/null | awk '/^n/{print substr($0,2);exit}'", pid),
+		).Output(); err == nil {
+			cwd = strings.TrimSpace(string(out))
+		}
+		return detailMsg{command: command, user: user, cwd: cwd}
+	}
+}
+
+func killProcess(pid string, portNum int, process string, force bool) tea.Cmd {
+	return func() tea.Msg {
+		sig := "-TERM"
+		if force {
+			sig = "-9"
+		}
+		err := exec.Command("kill", sig, pid).Run()
+		return killResultMsg{portNum: portNum, process: process, err: err}
+	}
+}
+
+func copyToClipboard(text string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("pbcopy")
+		cmd.Stdin = strings.NewReader(text)
+		_ = cmd.Run()
+		return copyDoneMsg{}
+	}
+}
+
+func clearFlash() tea.Cmd {
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return flashClearMsg{}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Bubble Tea interface
 // ---------------------------------------------------------------------------
@@ -204,31 +288,24 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(m.spinner.Tick, fetchPorts(), scheduleTick())
 }
 
+func (m model) selectedPort() (Port, bool) {
+	if m.cursor >= 0 && m.cursor < len(m.ports) {
+		return m.ports[m.cursor], true
+	}
+	return Port{}, false
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		case "j", "down":
-			if m.cursor < len(m.ports)-1 {
-				m.cursor++
-			}
-		case "k", "up":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case "enter":
-			if m.cursor < len(m.ports) {
-				p := m.ports[m.cursor]
-				if p.Number >= 3000 && p.Number <= 9999 {
-					_ = exec.Command("open", fmt.Sprintf("http://localhost:%d", p.Number)).Start()
-				}
-			}
-		case "r":
-			m.loading = true
-			return m, tea.Batch(m.spinner.Tick, fetchPorts())
+		switch m.mode {
+		case modeConfirmKill:
+			return m.updateConfirmKill(msg)
+		case modeDetail:
+			return m.updateDetail(msg)
+		default:
+			return m.updateList(msg)
 		}
 
 	case tea.WindowSizeMsg:
@@ -236,7 +313,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tickMsg:
-		return m, fetchPorts()
+		if m.mode == modeList {
+			return m, fetchPorts()
+		}
+		return m, scheduleTick()
 
 	case portsMsg:
 		m.loading = false
@@ -251,6 +331,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, scheduleTick()
 
+	case detailMsg:
+		m.detailCmd = msg.command
+		m.detailUser = msg.user
+		m.detailCwd = msg.cwd
+
+	case killResultMsg:
+		m.mode = modeList
+		if msg.err != nil {
+			m.flash = errStyle.Render(fmt.Sprintf("  ✗ Failed to kill %s on :%d", msg.process, msg.portNum))
+		} else {
+			m.flash = greenStyle.Render(fmt.Sprintf("  ✓ Killed %s on :%d", msg.process, msg.portNum))
+			// Optimistic removal — take it off the list immediately
+			filtered := make([]Port, 0, len(m.ports))
+			for _, p := range m.ports {
+				if p.Number != msg.portNum {
+					filtered = append(filtered, p)
+				}
+			}
+			m.ports = filtered
+			if m.cursor >= len(m.ports) {
+				m.cursor = max(0, len(m.ports)-1)
+			}
+		}
+		// Delayed refresh to confirm real state after process exits
+		return m, tea.Batch(
+			clearFlash(),
+			tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return killRefreshMsg{} }),
+		)
+
+	case killRefreshMsg:
+		return m, fetchPorts()
+
+	case copyDoneMsg:
+		// flash already set before dispatching
+		return m, clearFlash()
+
+	case flashClearMsg:
+		m.flash = ""
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -260,7 +379,103 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "j", "down":
+		if m.cursor < len(m.ports)-1 {
+			m.cursor++
+		}
+	case "k", "up":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+	case "enter":
+		if p, ok := m.selectedPort(); ok {
+			if p.Number >= 3000 && p.Number <= 9999 {
+				_ = exec.Command("open", fmt.Sprintf("http://localhost:%d", p.Number)).Start()
+			}
+		}
+	case "x":
+		if _, ok := m.selectedPort(); ok {
+			m.mode = modeConfirmKill
+			m.forceKill = false
+		}
+	case "X":
+		if _, ok := m.selectedPort(); ok {
+			m.mode = modeConfirmKill
+			m.forceKill = true
+		}
+	case "i":
+		if p, ok := m.selectedPort(); ok {
+			m.mode = modeDetail
+			m.detailPort = p
+			m.detailCmd = ""
+			m.detailUser = ""
+			m.detailCwd = ""
+			return m, fetchDetail(p.PID)
+		}
+	case "c":
+		if p, ok := m.selectedPort(); ok {
+			addr := fmt.Sprintf("localhost:%d", p.Number)
+			m.flash = greenStyle.Render(fmt.Sprintf("  ✓ Copied %s", addr))
+			return m, copyToClipboard(addr)
+		}
+	case "r":
+		m.loading = true
+		return m, tea.Batch(m.spinner.Tick, fetchPorts())
+	}
+	return m, nil
+}
+
+func (m model) updateConfirmKill(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		if p, ok := m.selectedPort(); ok {
+			return m, killProcess(p.PID, p.Number, p.Process, m.forceKill)
+		}
+		m.mode = modeList
+	case "f", "F":
+		m.forceKill = !m.forceKill
+	case "n", "N", "esc":
+		m.mode = modeList
+	}
+	return m, nil
+}
+
+func (m model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "i", "q":
+		m.mode = modeList
+	case "x":
+		m.mode = modeConfirmKill
+		m.forceKill = false
+	case "X":
+		m.mode = modeConfirmKill
+		m.forceKill = true
+	case "c":
+		addr := fmt.Sprintf("localhost:%d", m.detailPort.Number)
+		m.flash = greenStyle.Render(fmt.Sprintf("  ✓ Copied %s", addr))
+		return m, copyToClipboard(addr)
+	}
+	return m, nil
+}
+
+// ---------------------------------------------------------------------------
+// View
+// ---------------------------------------------------------------------------
+
 func (m model) View() string {
+	switch m.mode {
+	case modeDetail:
+		return m.viewDetail()
+	default:
+		return m.viewList()
+	}
+}
+
+func (m model) viewList() string {
 	var b strings.Builder
 	w := m.width
 	if w <= 0 {
@@ -329,7 +544,101 @@ func (m model) View() string {
 
 	// ── Footer ──────────────────────────────────────────────────────────
 	b.WriteString("\n")
-	b.WriteString(footerStyle.Render("  ↑↓/jk=nav  ⏎=open  r=refresh  q=quit") + "\n")
+	if m.mode == modeConfirmKill {
+		b.WriteString(m.viewConfirmKill())
+	} else if m.flash != "" {
+		b.WriteString(m.flash + "\n")
+	} else {
+		b.WriteString(footerStyle.Render("  ↑↓/jk=nav  ⏎=open  x=kill  i=info  c=copy  r=refresh  q=quit") + "\n")
+	}
+
+	return b.String()
+}
+
+func (m model) viewConfirmKill() string {
+	p, ok := m.selectedPort()
+	if !ok {
+		return ""
+	}
+
+	action := "Kill"
+	if m.forceKill {
+		action = warnStyle.Render("Force kill")
+	}
+
+	prompt := fmt.Sprintf("  %s %s on :%d (PID %s)?  ",
+		action,
+		orangeStyle.Render(p.Process),
+		p.Number,
+		dimStyle.Render(p.PID),
+	)
+
+	keys := footerStyle.Render("[y]es  [n]o  [f]orce")
+	return prompt + keys + "\n"
+}
+
+func (m model) viewDetail() string {
+	var b strings.Builder
+	w := m.width
+	if w <= 0 {
+		w = 40
+	}
+	p := m.detailPort
+
+	b.WriteString("\n")
+	b.WriteString("  " + titleStyle.Render("Port Details") + "\n")
+	b.WriteString(dimStyle.Render("  "+strings.Repeat("─", max(0, w-4))) + "\n")
+	b.WriteString("\n")
+
+	row := func(label, value string) {
+		b.WriteString("  " + labelStyle.Render(label) + valueStyle.Render(value) + "\n")
+	}
+
+	row("Port", fmt.Sprintf(":%d", p.Number))
+	row("Process", p.Process)
+	row("PID", p.PID)
+	row("Category", p.Category)
+	if p.Label != "" {
+		row("Service", p.Label)
+	}
+
+	b.WriteString("\n")
+
+	if m.detailCmd == "" && m.detailUser == "" && m.detailCwd == "" {
+		b.WriteString("  " + dimStyle.Render("loading...") + "\n")
+	} else {
+		if m.detailUser != "" {
+			row("User", m.detailUser)
+		}
+		if m.detailCwd != "" {
+			row("Directory", m.detailCwd)
+		}
+		if m.detailCmd != "" {
+			b.WriteString("\n")
+			b.WriteString("  " + labelStyle.Render("Command") + "\n")
+			// Wrap long commands
+			cmd := m.detailCmd
+			maxW := w - 6
+			if maxW > 0 && len(cmd) > maxW {
+				for len(cmd) > maxW {
+					b.WriteString("    " + dimStyle.Render(cmd[:maxW]) + "\n")
+					cmd = cmd[maxW:]
+				}
+				if len(cmd) > 0 {
+					b.WriteString("    " + dimStyle.Render(cmd) + "\n")
+				}
+			} else {
+				b.WriteString("    " + dimStyle.Render(cmd) + "\n")
+			}
+		}
+	}
+
+	b.WriteString("\n")
+	if m.flash != "" {
+		b.WriteString(m.flash + "\n")
+	} else {
+		b.WriteString(footerStyle.Render("  x=kill  X=force  c=copy  esc=back") + "\n")
+	}
 
 	return b.String()
 }

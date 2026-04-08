@@ -8,6 +8,12 @@
 _t_attach() {
   local name="$1"
   local link="${name}~$$"
+
+  # Prune orphaned linked sessions for this group (from unclean disconnects)
+  tmux list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null \
+    | awk -v base="$name" '$2 == 0 && $1 ~ "^"base"~"' \
+    | while read -r s _; do tmux kill-session -t "=$s" 2>/dev/null; done
+
   tmux new-session -d -t "=$name" -s "$link"
   tmux set-option -t "=$link" destroy-unattached on
   tmux attach-session -t "=$link"

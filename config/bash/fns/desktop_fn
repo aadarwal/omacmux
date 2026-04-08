@@ -28,7 +28,7 @@ desktop() {
   [[ -z $TMUX ]] && { echo "desktop requires tmux."; return 1; }
 
   local widgets_dir="$HOME/omacmux/desktop/widgets"
-  local accounts_dir="$HOME/desktop/accounts/portfolio"
+  local accounts_dir="$HOME/desktop/artha"
 
   # Build widgets if binaries don't exist
   for widget in projects news status ports; do
@@ -39,10 +39,10 @@ desktop() {
     fi
   done
 
-  # Build accounts if needed
-  if [[ ! -x "$accounts_dir/portfolio" && -f "$accounts_dir/main.go" ]]; then
-    echo "Building portfolio..."
-    (cd "$accounts_dir" && go build -o portfolio . 2>&1) || echo "Warning: portfolio build failed"
+  # Build artha if needed
+  if [[ ! -x "$accounts_dir/artha" && -f "$accounts_dir/main.go" ]]; then
+    echo "Building artha..."
+    (cd "$accounts_dir" && go build -o artha . 2>&1) || echo "Warning: artha build failed"
   fi
 
   # Create the desktop window
@@ -89,8 +89,8 @@ desktop() {
   tmux send-keys -t "$btop_pane" "btop" C-m
 
   # Portfolio — use compiled binary or go run
-  if [[ -x "$accounts_dir/portfolio" ]]; then
-    tmux send-keys -t "$portfolio_pane" "$accounts_dir/portfolio" C-m
+  if [[ -x "$accounts_dir/artha" ]]; then
+    tmux send-keys -t "$portfolio_pane" "$accounts_dir/artha" C-m
   elif [[ -f "$accounts_dir/main.go" ]]; then
     tmux send-keys -t "$portfolio_pane" "cd '$accounts_dir' && go run ." C-m
   else
