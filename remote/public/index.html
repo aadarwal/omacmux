@@ -1,0 +1,1266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0d1117">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="Remote control for omacmux AI agent orchestration">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <title>omacmux</title>
+  <style>
+    /* ------------------------------------------------------------------ */
+    /* Reset & Base                                                       */
+    /* ------------------------------------------------------------------ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface2: #1c2129;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --accent: #58a6ff;
+      --success: #3fb950;
+      --warning: #d29922;
+      --danger: #f85149;
+      --purple: #bc8cff;
+      --orange: #f0883e;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+      --safe-top: env(safe-area-inset-top, 0px);
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: none;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* App Shell                                                          */
+    /* ------------------------------------------------------------------ */
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      max-width: 768px;
+      margin: 0 auto;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Title Bar                                                          */
+    /* ------------------------------------------------------------------ */
+    .title-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: calc(var(--safe-top) + 12px) 16px 12px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .title-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .title-bar h1 {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--accent);
+    }
+
+    .title-host {
+      font-size: 11px;
+      color: var(--text-muted);
+      background: var(--surface2);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    .title-bar .right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .connection-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--danger);
+      transition: background 0.3s;
+    }
+
+    .connection-dot.connected {
+      background: var(--success);
+      box-shadow: 0 0 6px var(--success);
+    }
+
+    .tab-bar {
+      display: flex;
+      gap: 0;
+    }
+
+    .tab-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 13px;
+      padding: 6px 12px;
+      cursor: pointer;
+      border-radius: var(--radius-sm);
+      transition: all 0.2s;
+    }
+
+    .tab-btn.active {
+      color: var(--accent);
+      background: rgba(88, 166, 255, 0.1);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Notification Banner                                                */
+    /* ------------------------------------------------------------------ */
+    .notification-banner {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 1000;
+      padding: calc(var(--safe-top) + 8px) 16px 8px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      text-align: center;
+      transform: translateY(-100%);
+      transition: transform 0.3s ease;
+    }
+
+    .notification-banner.visible {
+      transform: translateY(0);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Tabs / Views                                                       */
+    /* ------------------------------------------------------------------ */
+    .views {
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .view {
+      position: absolute;
+      inset: 0;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 12px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+    }
+
+    .view.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Swarm Status Bar                                                   */
+    /* ------------------------------------------------------------------ */
+    .swarm-bars {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .swarm-bar {
+      padding: 10px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .swarm-bar .topology {
+      color: var(--purple);
+      font-weight: 600;
+    }
+
+    .swarm-bar .swarm-id {
+      color: var(--text-muted);
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 11px;
+    }
+
+    .swarm-bar .agent-count {
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    .swarm-bar .swarm-status {
+      margin-left: auto;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 8px;
+      font-weight: 600;
+    }
+
+    .swarm-bar .swarm-status.running {
+      background: rgba(63, 185, 80, 0.15);
+      color: var(--success);
+    }
+
+    .swarm-bar .swarm-status.active {
+      background: rgba(63, 185, 80, 0.15);
+      color: var(--success);
+    }
+
+    .swarm-bar .swarm-status.killed {
+      background: rgba(248, 81, 73, 0.15);
+      color: var(--danger);
+    }
+
+    .swarm-bar .swarm-status.stopped {
+      background: rgba(248, 81, 73, 0.15);
+      color: var(--danger);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Agent Cards                                                        */
+    /* ------------------------------------------------------------------ */
+    .agents-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+
+    @media (min-width: 600px) {
+      .agents-grid { grid-template-columns: repeat(3, 1fr); }
+    }
+
+    .agent-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      -webkit-user-select: none;
+      user-select: none;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .agent-card:active {
+      transform: scale(0.97);
+      background: var(--surface2);
+    }
+
+    .agent-card .name {
+      font-size: 18px;
+      font-weight: 700;
+      text-transform: capitalize;
+      margin-bottom: 6px;
+    }
+
+    .agent-card .status-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .status-active { background: rgba(63, 185, 80, 0.15); color: var(--success); }
+    .status-running { background: rgba(63, 185, 80, 0.15); color: var(--success); }
+    .status-idle { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
+    .status-waiting { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
+    .status-done { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+    .status-completed { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+    .status-error { background: rgba(248, 81, 73, 0.15); color: var(--danger); }
+    .status-failed { background: rgba(248, 81, 73, 0.15); color: var(--danger); }
+
+    .agent-card .role {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 6px;
+    }
+
+    .agent-card .branch {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--text-muted);
+    }
+
+    .empty-state .icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+      opacity: 0.5;
+    }
+
+    .empty-state p {
+      font-size: 15px;
+      margin-bottom: 8px;
+    }
+
+    .empty-state .hint {
+      font-size: 13px;
+      opacity: 0.7;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Agent Detail Panel (slide-up)                                      */
+    /* ------------------------------------------------------------------ */
+    .detail-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      background: rgba(0, 0, 0, 0.6);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s;
+    }
+
+    .detail-overlay.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .detail-panel {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 201;
+      max-width: 768px;
+      margin: 0 auto;
+      background: var(--surface);
+      border-top-left-radius: 20px;
+      border-top-right-radius: 20px;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      transform: translateY(100%);
+      transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+      padding-bottom: var(--safe-bottom);
+    }
+
+    .detail-overlay.visible .detail-panel {
+      transform: translateY(0);
+    }
+
+    .detail-handle {
+      width: 36px;
+      height: 5px;
+      background: var(--border);
+      border-radius: 3px;
+      margin: 10px auto 0;
+      flex-shrink: 0;
+    }
+
+    .detail-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px 12px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .detail-header .name {
+      font-size: 22px;
+      font-weight: 700;
+      text-transform: capitalize;
+    }
+
+    .detail-header .close-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 24px;
+      cursor: pointer;
+      width: 48px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      transition: background 0.2s;
+    }
+
+    .detail-header .close-btn:active {
+      background: var(--surface2);
+    }
+
+    .detail-meta {
+      padding: 12px 20px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      font-size: 13px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .detail-meta dt { color: var(--text-muted); }
+    .detail-meta dd { color: var(--text); font-weight: 500; }
+
+    .detail-output {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 12px 20px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: var(--text-muted);
+      background: var(--bg);
+      margin: 0 12px;
+      border-radius: var(--radius-sm);
+      min-height: 120px;
+      position: relative;
+    }
+
+    .detail-output .spinner-wrap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+    }
+
+    .detail-input {
+      display: flex;
+      gap: 8px;
+      padding: 12px 20px;
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .detail-input input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+    }
+
+    .detail-input input:focus { border-color: var(--accent); }
+
+    .detail-input button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-sm);
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      min-width: 48px;
+      transition: opacity 0.2s;
+    }
+
+    .detail-input button:active { opacity: 0.8; }
+
+    /* ------------------------------------------------------------------ */
+    /* Event Feed                                                         */
+    /* ------------------------------------------------------------------ */
+    .event-list {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .event-item {
+      display: flex;
+      gap: 10px;
+      padding: 10px 12px;
+      background: var(--surface);
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      align-items: flex-start;
+    }
+
+    .event-item .time {
+      color: var(--text-muted);
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 11px;
+      flex-shrink: 0;
+      padding-top: 1px;
+    }
+
+    .event-item .event-icon {
+      flex-shrink: 0;
+      width: 20px;
+      text-align: center;
+    }
+
+    .event-item .desc {
+      flex: 1;
+      color: var(--text);
+    }
+
+    .event-item .agent-tag {
+      color: var(--accent);
+      font-weight: 600;
+      text-transform: capitalize;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Command Bar                                                        */
+    /* ------------------------------------------------------------------ */
+    .command-bar {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 10px 12px calc(var(--safe-bottom) + 10px);
+      flex-shrink: 0;
+    }
+
+    .quick-actions {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+
+    .quick-actions::-webkit-scrollbar { display: none; }
+
+    .pill-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 20px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: all 0.15s;
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .pill-btn:active {
+      background: var(--accent);
+      border-color: var(--accent);
+      transform: scale(0.95);
+    }
+
+    .pill-btn.accent {
+      background: rgba(88, 166, 255, 0.15);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .command-input-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .command-input-row input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      color: var(--text);
+      font-size: 15px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      outline: none;
+      min-height: 48px;
+    }
+
+    .command-input-row input::placeholder { color: var(--text-muted); }
+    .command-input-row input:focus { border-color: var(--accent); }
+
+    .command-input-row button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius);
+      padding: 12px 20px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      min-width: 48px;
+      min-height: 48px;
+      transition: opacity 0.2s;
+    }
+
+    .command-input-row button:active { opacity: 0.8; }
+    .command-input-row button:disabled { opacity: 0.5; }
+
+    /* ------------------------------------------------------------------ */
+    /* Loading & Misc                                                     */
+    /* ------------------------------------------------------------------ */
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .loading { animation: pulse 2s ease-in-out infinite; }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <noscript>
+    <div style="background:#161b22;color:#e6edf3;padding:40px 20px;text-align:center;font-family:system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+      <h1 style="font-size:24px;margin-bottom:16px;color:#58a6ff;">omacmux remote</h1>
+      <p style="color:#8b949e;max-width:400px;">JavaScript is required for the live dashboard. The server is running -- you can use the API endpoints directly:</p>
+      <pre style="background:#0d1117;padding:16px;border-radius:8px;margin-top:16px;font-size:13px;text-align:left;color:#8b949e;">GET /api/status
+GET /api/swarms
+GET /api/swarm/:id
+GET /api/agent/:name
+GET /api/pane/:name
+POST /api/command
+POST /api/tell/:name
+GET /api/events (SSE)</pre>
+    </div>
+  </noscript>
+
+  <div id="app">
+    <!-- Notification Banner -->
+    <div id="notification-banner" class="notification-banner"></div>
+
+    <!-- Title Bar -->
+    <header class="title-bar">
+      <div class="title-left">
+        <h1>omacmux</h1>
+        <span class="title-host" id="hostname-display"></span>
+      </div>
+      <div class="right">
+        <div class="tab-bar">
+          <button class="tab-btn active" data-tab="agents">Agents</button>
+          <button class="tab-btn" data-tab="events">Events</button>
+        </div>
+        <div id="connection-dot" class="connection-dot" title="Disconnected"></div>
+      </div>
+    </header>
+
+    <!-- Views -->
+    <div class="views">
+      <!-- Agents View -->
+      <div id="view-agents" class="view active">
+        <div id="swarm-bars" class="swarm-bars"></div>
+        <div id="agents-grid" class="agents-grid">
+          <div class="empty-state" style="grid-column: 1 / -1">
+            <div class="icon">*</div>
+            <p>Loading...</p>
+            <p class="hint"><span class="spinner"></span></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Events View -->
+      <div id="view-events" class="view">
+        <div id="event-list" class="event-list">
+          <div class="empty-state">
+            <div class="icon">~</div>
+            <p>No events yet</p>
+            <p class="hint">Events will appear as agents work</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Agent Detail Panel -->
+    <div id="detail-overlay" class="detail-overlay">
+      <div class="detail-panel">
+        <div class="detail-handle"></div>
+        <div class="detail-header">
+          <span id="detail-name" class="name">Alpha</span>
+          <button class="close-btn" id="detail-close">&times;</button>
+        </div>
+        <dl class="detail-meta" id="detail-meta">
+          <dt>ID</dt><dd id="detail-id">-</dd>
+          <dt>Status</dt><dd id="detail-status">-</dd>
+          <dt>Role</dt><dd id="detail-role">-</dd>
+          <dt>Branch</dt><dd id="detail-branch">-</dd>
+          <dt>Pane</dt><dd id="detail-pane">-</dd>
+          <dt>Swarm</dt><dd id="detail-swarm">-</dd>
+        </dl>
+        <div id="detail-output" class="detail-output">
+          <div class="spinner-wrap"><span class="spinner"></span></div>
+        </div>
+        <div class="detail-input">
+          <input type="text" id="detail-msg-input" placeholder="Send message to agent..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          <button id="detail-send-btn">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Command Bar -->
+    <div class="command-bar">
+      <div class="quick-actions">
+        <button class="pill-btn accent" data-cmd="vibe 4">Vibe 4</button>
+        <button class="pill-btn" data-cmd="scan explore">Scan</button>
+        <button class="pill-btn" data-cmd="check">Check</button>
+        <button class="pill-btn" data-cmd="review">Review</button>
+        <button class="pill-btn" data-cmd="who">Who</button>
+        <button class="pill-btn" data-cmd="swarm status">Status</button>
+      </div>
+      <div class="command-input-row">
+        <input type="text" id="command-input" placeholder='tell alpha "focus on auth"' autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        <button id="command-submit">Run</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ------------------------------------------------------------------
+    // App State
+    // ------------------------------------------------------------------
+    const state = {
+      connected: false,
+      swarms: [],
+      agents: [],
+      events: [],
+      selectedAgent: null,
+      paneRefreshTimer: null,
+    };
+
+    const NATO_MAP = {
+      'agent-1': 'alpha', 'agent-2': 'bravo', 'agent-3': 'charlie', 'agent-4': 'delta',
+      'agent-5': 'echo', 'agent-6': 'foxtrot', 'agent-7': 'golf', 'agent-8': 'hotel',
+    };
+
+    // ------------------------------------------------------------------
+    // DOM refs
+    // ------------------------------------------------------------------
+    const $ = (sel) => document.querySelector(sel);
+    const $$ = (sel) => document.querySelectorAll(sel);
+    const dom = {
+      connectionDot: $('#connection-dot'),
+      hostnameDisplay: $('#hostname-display'),
+      swarmBars: $('#swarm-bars'),
+      agentsGrid: $('#agents-grid'),
+      eventList: $('#event-list'),
+      commandInput: $('#command-input'),
+      commandSubmit: $('#command-submit'),
+      detailOverlay: $('#detail-overlay'),
+      detailName: $('#detail-name'),
+      detailId: $('#detail-id'),
+      detailStatus: $('#detail-status'),
+      detailRole: $('#detail-role'),
+      detailBranch: $('#detail-branch'),
+      detailPane: $('#detail-pane'),
+      detailSwarm: $('#detail-swarm'),
+      detailOutput: $('#detail-output'),
+      detailMsgInput: $('#detail-msg-input'),
+      detailSendBtn: $('#detail-send-btn'),
+      detailClose: $('#detail-close'),
+      notificationBanner: $('#notification-banner'),
+    };
+
+    // Show hostname
+    dom.hostnameDisplay.textContent = location.hostname;
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str || '';
+      return div.innerHTML;
+    }
+
+    // ------------------------------------------------------------------
+    // API helpers
+    // ------------------------------------------------------------------
+    async function api(path, opts = {}) {
+      try {
+        const res = await fetch('/api' + path, {
+          headers: { 'Content-Type': 'application/json' },
+          ...opts,
+        });
+        return await res.json();
+      } catch (err) {
+        console.error('API ' + path + ' failed:', err);
+        return null;
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Tab switching
+    // ------------------------------------------------------------------
+    $$('.tab-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        $$('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        $$('.view').forEach(function(v) { v.classList.remove('active'); });
+        $('#view-' + btn.dataset.tab).classList.add('active');
+      });
+    });
+
+    // ------------------------------------------------------------------
+    // Fetch swarms + agents
+    // ------------------------------------------------------------------
+    async function refreshAgents() {
+      const swarms = await api('/swarms');
+      if (!swarms || !Array.isArray(swarms)) return;
+
+      state.swarms = swarms;
+      state.agents = [];
+
+      for (var i = 0; i < swarms.length; i++) {
+        var swarm = swarms[i];
+        if (swarm.agents && Array.isArray(swarm.agents)) {
+          for (var j = 0; j < swarm.agents.length; j++) {
+            var agent = swarm.agents[j];
+            agent._swarm_id = swarm._id || swarm.id || '';
+            agent._swarm_name = swarm.name || '';
+            agent._nato = agent._nato || NATO_MAP[agent.id] || agent.id;
+            state.agents.push(agent);
+          }
+        }
+      }
+
+      renderSwarmBars();
+      renderAgents();
+    }
+
+    // ------------------------------------------------------------------
+    // Render swarm status bars
+    // ------------------------------------------------------------------
+    function renderSwarmBars() {
+      if (state.swarms.length === 0) {
+        dom.swarmBars.innerHTML = '';
+        return;
+      }
+
+      dom.swarmBars.innerHTML = state.swarms.map(function(sw) {
+        var topo = escapeHtml(sw.topology || '');
+        var id = escapeHtml((sw._id || sw.id || '').substring(0, 12));
+        var status = escapeHtml(sw.status || 'unknown');
+        var agentCount = (sw.agents && Array.isArray(sw.agents)) ? sw.agents.length : 0;
+        return '<div class="swarm-bar">' +
+          '<span class="topology">' + topo + '</span>' +
+          '<span class="swarm-id">' + id + '</span>' +
+          '<span class="agent-count">' + agentCount + ' agent' + (agentCount !== 1 ? 's' : '') + '</span>' +
+          '<span class="swarm-status ' + status + '">' + status + '</span>' +
+          '</div>';
+      }).join('');
+    }
+
+    // ------------------------------------------------------------------
+    // Render agent cards
+    // ------------------------------------------------------------------
+    function renderAgents() {
+      if (state.agents.length === 0) {
+        dom.agentsGrid.innerHTML =
+          '<div class="empty-state" style="grid-column: 1 / -1">' +
+          '<div class="icon">*</div>' +
+          '<p>No active agents</p>' +
+          '<p class="hint">Use "vibe 4" or "scan explore" to deploy agents</p>' +
+          '</div>';
+        return;
+      }
+
+      // Sort by id
+      var sorted = state.agents.slice().sort(function(a, b) {
+        return (a.id || '').localeCompare(b.id || '');
+      });
+
+      dom.agentsGrid.innerHTML = sorted.map(function(agent) {
+        var name = agent._nato || 'unknown';
+        var status = (agent.status || 'unknown').toLowerCase();
+        var role = agent.role || '-';
+        var branch = agent.branch || '';
+        return '<div class="agent-card" data-agent="' + escapeHtml(name) + '" data-swarm="' + escapeHtml(agent._swarm_id || '') + '">' +
+          '<div class="name">' + escapeHtml(name) + '</div>' +
+          '<span class="status-badge status-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>' +
+          '<div class="role">' + escapeHtml(role) + '</div>' +
+          (branch ? '<div class="branch">' + escapeHtml(branch) + '</div>' : '') +
+          '</div>';
+      }).join('');
+
+      // Add click handlers for detail panel
+      $$('.agent-card').forEach(function(card) {
+        card.addEventListener('click', function() {
+          openAgentDetail(card.dataset.agent, card.dataset.swarm);
+        });
+      });
+    }
+
+    // ------------------------------------------------------------------
+    // Agent Detail Panel
+    // ------------------------------------------------------------------
+    async function openAgentDetail(natoName, swarmId) {
+      state.selectedAgent = natoName;
+
+      dom.detailName.textContent = natoName;
+      dom.detailOutput.innerHTML = '<div class="spinner-wrap"><span class="spinner"></span></div>';
+
+      // Fill metadata from cached agent list
+      var agent = state.agents.find(function(a) { return a._nato === natoName; });
+      if (agent) {
+        dom.detailId.textContent = agent.id || '-';
+        dom.detailStatus.textContent = agent.status || '-';
+        dom.detailRole.textContent = agent.role || '-';
+        dom.detailBranch.textContent = agent.branch || '-';
+        dom.detailPane.textContent = agent.pane_id || '-';
+        dom.detailSwarm.textContent = agent._swarm_name || swarmId || '-';
+      }
+
+      dom.detailOverlay.classList.add('visible');
+      dom.detailMsgInput.value = '';
+
+      // Fetch pane output
+      await refreshPaneOutput(natoName);
+
+      // Auto-refresh pane output every 3 seconds
+      clearInterval(state.paneRefreshTimer);
+      state.paneRefreshTimer = setInterval(function() { refreshPaneOutput(natoName); }, 3000);
+    }
+
+    async function refreshPaneOutput(natoName) {
+      if (state.selectedAgent !== natoName) return;
+      var data = await api('/pane/' + natoName);
+      if (!data) return;
+      if (data.raw !== undefined) {
+        dom.detailOutput.textContent = data.raw || '(empty)';
+        dom.detailOutput.scrollTop = dom.detailOutput.scrollHeight;
+      } else if (data.error) {
+        dom.detailOutput.textContent = '[' + data.error + ']';
+      }
+    }
+
+    function closeAgentDetail() {
+      dom.detailOverlay.classList.remove('visible');
+      state.selectedAgent = null;
+      clearInterval(state.paneRefreshTimer);
+    }
+
+    dom.detailClose.addEventListener('click', closeAgentDetail);
+    dom.detailOverlay.addEventListener('click', function(e) {
+      if (e.target === dom.detailOverlay) closeAgentDetail();
+    });
+
+    // Send message from detail panel
+    async function sendDetailMessage() {
+      var msg = dom.detailMsgInput.value.trim();
+      if (!msg || !state.selectedAgent) return;
+
+      dom.detailSendBtn.disabled = true;
+      dom.detailSendBtn.textContent = '...';
+
+      await api('/tell/' + state.selectedAgent, {
+        method: 'POST',
+        body: JSON.stringify({ msg: msg }),
+      });
+
+      dom.detailMsgInput.value = '';
+      dom.detailSendBtn.disabled = false;
+      dom.detailSendBtn.textContent = 'Send';
+
+      showNotification('Message sent to ' + state.selectedAgent);
+    }
+
+    dom.detailSendBtn.addEventListener('click', sendDetailMessage);
+    dom.detailMsgInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') sendDetailMessage();
+    });
+
+    // ------------------------------------------------------------------
+    // Command bar
+    // ------------------------------------------------------------------
+    async function executeCommand(cmd) {
+      if (!cmd) return;
+
+      dom.commandSubmit.disabled = true;
+      dom.commandSubmit.textContent = '...';
+
+      // Parse "tell <name> <msg>" pattern and route to /api/tell
+      var tellMatch = cmd.match(/^tell\s+(\w+)\s+"?(.+?)"?$/i);
+      if (tellMatch) {
+        var name = tellMatch[1];
+        var message = tellMatch[2];
+        await api('/tell/' + name, {
+          method: 'POST',
+          body: JSON.stringify({ msg: message }),
+        });
+        showNotification('Message sent to ' + name);
+        dom.commandSubmit.disabled = false;
+        dom.commandSubmit.textContent = 'Run';
+        return;
+      }
+
+      var result = await api('/command', {
+        method: 'POST',
+        body: JSON.stringify({ cmd: cmd }),
+      });
+
+      dom.commandSubmit.disabled = false;
+      dom.commandSubmit.textContent = 'Run';
+
+      if (result) {
+        showNotification(result.ok ? 'Ran: ' + cmd : 'Failed: ' + cmd, result.ok ? 'info' : 'error');
+        // Refresh after command
+        setTimeout(refreshAgents, 1000);
+      }
+    }
+
+    dom.commandSubmit.addEventListener('click', function() {
+      var cmd = dom.commandInput.value.trim();
+      if (cmd) {
+        executeCommand(cmd);
+        dom.commandInput.value = '';
+      }
+    });
+
+    dom.commandInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        var cmd = dom.commandInput.value.trim();
+        if (cmd) {
+          executeCommand(cmd);
+          dom.commandInput.value = '';
+        }
+      }
+    });
+
+    // Quick action pills
+    $$('.pill-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        executeCommand(btn.dataset.cmd);
+      });
+    });
+
+    // ------------------------------------------------------------------
+    // Event Feed
+    // ------------------------------------------------------------------
+    var EVENT_ICONS = {
+      agent_started: '\u25B6',
+      agent_completed: '\u2713',
+      agent_updated: '\u2022',
+      agent_error: '\u2717',
+      agent_removed: '\u2212',
+      swarm_created: '\u2726',
+      swarm_updated: '\u21BB',
+      swarm_killed: '\u2612',
+      swarm_deleted: '\u2212',
+      message_sent: '\u2709',
+      command_executed: '\u276F',
+      connected: '\u2022',
+    };
+
+    function addEvent(event) {
+      state.events.unshift(event);
+      if (state.events.length > 200) state.events.pop();
+      renderEvents();
+    }
+
+    function renderEvents() {
+      if (state.events.length === 0) return;
+
+      dom.eventList.innerHTML = state.events.slice(0, 100).map(function(evt) {
+        var time = evt.timestamp ? new Date(evt.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+        var icon = EVENT_ICONS[evt.type] || '\u2022';
+        var agentName = evt.agent_name || '';
+        var desc = formatEventDesc(evt);
+        return '<div class="event-item">' +
+          '<span class="time">' + escapeHtml(time) + '</span>' +
+          '<span class="event-icon">' + icon + '</span>' +
+          '<span class="desc">' + (agentName ? '<span class="agent-tag">' + escapeHtml(agentName) + '</span> ' : '') + desc + '</span>' +
+          '</div>';
+      }).join('');
+    }
+
+    function formatEventDesc(evt) {
+      switch (evt.type) {
+        case 'agent_started': return 'started (' + escapeHtml(evt.role || 'worker') + ')';
+        case 'agent_completed': return 'completed';
+        case 'agent_updated': return 'updated &mdash; ' + escapeHtml(evt.status || '');
+        case 'agent_error': return 'error';
+        case 'agent_removed': return 'removed';
+        case 'swarm_created': return 'Swarm "' + escapeHtml(evt.name || evt.swarm_id || '') + '" created';
+        case 'swarm_updated': return 'Swarm "' + escapeHtml(evt.name || evt.swarm_id || '') + '" ' + escapeHtml(evt.status || 'updated');
+        case 'swarm_killed': return 'Swarm "' + escapeHtml(evt.name || evt.swarm_id || '') + '" killed';
+        case 'swarm_deleted': return 'Swarm "' + escapeHtml(evt.name || evt.swarm_id || '') + '" deleted';
+        case 'message_sent': return evt.message ? '"' + escapeHtml(evt.message) + '"' : 'message sent';
+        case 'command_executed': return escapeHtml(evt.command || '') + ' ' + (evt.success ? '(ok)' : '(failed)');
+        case 'connected': return 'Connected to server';
+        default: return escapeHtml(evt.type || '');
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Notifications (in-app banner)
+    // ------------------------------------------------------------------
+    var notifTimeout = null;
+
+    function showNotification(text, type) {
+      type = type || 'info';
+      var banner = dom.notificationBanner;
+      banner.textContent = text;
+      banner.style.background = type === 'error' ? 'var(--danger)' : 'var(--accent)';
+      banner.classList.add('visible');
+      clearTimeout(notifTimeout);
+      notifTimeout = setTimeout(function() { banner.classList.remove('visible'); }, 3000);
+
+      // Native notification
+      if ('Notification' in window && Notification.permission === 'granted') {
+        try { new Notification('omacmux', { body: text, icon: '/icon.svg' }); } catch (e) {}
+      }
+    }
+
+    // Request notification permission on first interaction
+    if ('Notification' in window && Notification.permission === 'default') {
+      document.addEventListener('click', function askPermission() {
+        Notification.requestPermission();
+        document.removeEventListener('click', askPermission);
+      }, { once: true });
+    }
+
+    // ------------------------------------------------------------------
+    // SSE Connection (data-only format from Go server)
+    // ------------------------------------------------------------------
+    var sseRetryDelay = 1000;
+    var evtSource = null;
+
+    function connectSSE() {
+      if (evtSource) {
+        evtSource.close();
+        evtSource = null;
+      }
+
+      evtSource = new EventSource('/api/events');
+
+      evtSource.onopen = function() {
+        state.connected = true;
+        dom.connectionDot.classList.add('connected');
+        dom.connectionDot.title = 'Connected';
+        sseRetryDelay = 1000;
+      };
+
+      // Go server sends all events as generic "message" events (data: {...})
+      evtSource.onmessage = function(e) {
+        try {
+          var event = JSON.parse(e.data);
+          handleSSEEvent(event);
+        } catch (err) {
+          console.error('SSE parse error:', err);
+        }
+      };
+
+      evtSource.onerror = function() {
+        state.connected = false;
+        dom.connectionDot.classList.remove('connected');
+        dom.connectionDot.title = 'Disconnected';
+
+        if (evtSource) {
+          evtSource.close();
+          evtSource = null;
+        }
+
+        // Exponential backoff reconnect
+        setTimeout(connectSSE, sseRetryDelay);
+        sseRetryDelay = Math.min(sseRetryDelay * 2, 30000);
+      };
+    }
+
+    function handleSSEEvent(event) {
+      if (!event || !event.type) return;
+
+      // Skip the initial connected event (we handle onopen)
+      if (event.type === 'connected') {
+        addEvent(event);
+        return;
+      }
+
+      addEvent(event);
+
+      // Show notifications for important events
+      if (event.type === 'agent_started') {
+        showNotification((event.agent_name || 'Agent') + ' started');
+      } else if (event.type === 'agent_completed') {
+        showNotification((event.agent_name || 'Agent') + ' completed');
+      } else if (event.type === 'agent_error') {
+        showNotification((event.agent_name || 'Agent') + ' error', 'error');
+      } else if (event.type === 'swarm_killed') {
+        showNotification('Swarm killed', 'error');
+      }
+
+      // Refresh agent grid on state change events
+      if (event.type.indexOf('swarm_') === 0 || event.type.indexOf('agent_') === 0) {
+        refreshAgents();
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Service Worker Registration
+    // ------------------------------------------------------------------
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(function() {});
+    }
+
+    // ------------------------------------------------------------------
+    // Init
+    // ------------------------------------------------------------------
+    refreshAgents();
+    connectSSE();
+
+    // Periodic refresh as backup
+    setInterval(refreshAgents, 30000);
+  </script>
+</body>
+</html>
