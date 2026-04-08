@@ -1,0 +1,16 @@
+{
+  "id": "ec5e2f",
+  "type": "fix",
+  "priority": 4,
+  "title": "f-string missing closing quote in thorlabs warning",
+  "description": "thorlabs.py line 68: f-string starts with f\" but the DEFAULT_DLL_PATH reference uses a raw quote: 'Resolve to use Thorlabs cameras.\\nDefault path: \"{DEFAULT_DLL_PATH}\"' — the {DEFAULT_DLL_PATH} is inside a non-f-string continuation. Verify if this renders correctly.",
+  "status": "done",
+  "source": "",
+  "auto_approve": true,
+  "swarm_id": "Already fixed in thorlabs.py commit",
+  "branch": null,
+  "result": null,
+  "error": null,
+  "created": "2026-03-31T01:03:14Z",
+  "updated": "2026-03-31T01:09:47Z"
+}

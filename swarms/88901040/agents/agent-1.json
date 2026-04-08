@@ -1,0 +1,10 @@
+{
+  "id": "agent-1",
+  "pane_id": "%28",
+  "role": "conductor",
+  "command": "cxx",
+  "device": "local",
+  "remote_pane": null,
+  "status": "active",
+  "started": "2026-03-31T01:00:26Z"
+}

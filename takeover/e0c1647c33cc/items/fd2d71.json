@@ -1,0 +1,16 @@
+{
+  "id": "fd2d71",
+  "type": "fix",
+  "priority": 3,
+  "title": "Bare except clauses across camera drivers",
+  "description": "Multiple camera drivers use bare 'except:' - simulated.py:11, mindvision.py:20, imagingsource.py, flir.py, basler.py, alliedvision.py, camera.py, instrumental.py. Replace with appropriate typed exceptions (ImportError for import blocks, Exception for others). 62 total bare excepts across 24 files.",
+  "status": "done",
+  "source": "",
+  "auto_approve": true,
+  "swarm_id": "Fixing bare except clauses across all camera/SLM drivers",
+  "branch": null,
+  "result": null,
+  "error": null,
+  "created": "2026-03-31T01:03:00Z",
+  "updated": "2026-03-31T01:09:38Z"
+}

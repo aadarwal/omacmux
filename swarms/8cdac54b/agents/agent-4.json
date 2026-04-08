@@ -1,0 +1,10 @@
+{
+  "id": "agent-4",
+  "pane_id": "%31",
+  "role": "worker",
+  "command": "cxx",
+  "device": "local",
+  "remote_pane": null,
+  "status": "active",
+  "started": "2026-03-31T00:54:54Z"
+}

@@ -1,0 +1,16 @@
+{
+  "id": "c7fe70",
+  "type": "research",
+  "priority": 4,
+  "title": "Investigate bare except cleanup strategy",
+  "description": "62 bare 'except:' across 24 files. Many are in import fallback blocks (safe but not ideal) and hardware init (where any exception type is genuinely unknown). Need to decide: batch fix all at once, or selectively fix only the dangerous ones? Architectural decision for maintainers.",
+  "status": "discovered",
+  "source": "",
+  "auto_approve": false,
+  "swarm_id": null,
+  "branch": null,
+  "result": null,
+  "error": null,
+  "created": "2026-03-31T01:03:08Z",
+  "updated": "2026-03-31T01:03:08Z"
+}

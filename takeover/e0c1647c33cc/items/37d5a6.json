@@ -1,0 +1,16 @@
+{
+  "id": "37d5a6",
+  "type": "fix",
+  "priority": 3,
+  "title": "Bare except clauses in thorlabs.py",
+  "description": "thorlabs.py lines 64,134,222 use bare 'except:' which catches KeyboardInterrupt and SystemExit. Replace with 'except Exception:' in all three cases. This is a trivial fix that improves exception handling hygiene.",
+  "status": "done",
+  "source": "",
+  "auto_approve": true,
+  "swarm_id": "Fixing bare except clauses in thorlabs.py",
+  "branch": null,
+  "result": null,
+  "error": null,
+  "created": "2026-03-31T01:02:55Z",
+  "updated": "2026-03-31T01:06:16Z"
+}

@@ -1,0 +1,16 @@
+{
+  "id": "5d82c7",
+  "type": "fix",
+  "priority": 2,
+  "title": "NotImplementedError('TODO') in cameraslms.py:708",
+  "description": "cameraslms.py line 708 raises NotImplementedError('TODO') when periods is a scalar in what appears to be wavefront calibration. This is a runtime error users could hit. Needs investigation into what the correct behavior should be.",
+  "status": "discovered",
+  "source": "",
+  "auto_approve": false,
+  "swarm_id": null,
+  "branch": null,
+  "result": null,
+  "error": null,
+  "created": "2026-03-31T01:03:05Z",
+  "updated": "2026-03-31T01:03:05Z"
+}

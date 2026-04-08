@@ -1,0 +1,16 @@
+{
+  "id": "c58057",
+  "type": "fix",
+  "priority": 3,
+  "title": "Bare except clauses in pylablib.py",
+  "description": "pylablib.py lines 30,125 use bare 'except:'. Replace with 'except ImportError:' (line 30) and 'except Exception:' (line 125).",
+  "status": "done",
+  "source": "",
+  "auto_approve": true,
+  "swarm_id": "Fixing bare except clauses in pylablib.py",
+  "branch": null,
+  "result": null,
+  "error": null,
+  "created": "2026-03-31T01:02:57Z",
+  "updated": "2026-03-31T01:06:39Z"
+}

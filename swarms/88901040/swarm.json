@@ -1,0 +1,20 @@
+{
+  "id": "88901040",
+  "name": "swarm-88901040",
+  "topology": "star",
+  "hub": "local",
+  "status": "running",
+  "conductor": "agent-1",
+  "working_dir": "/Users/aadarwal/Desktop/slmsuite",
+  "window_id": "@3",
+  "session": "homi~61926",
+  "created": "2026-03-31T01:00:26Z",
+  "agents": [
+    "agent-1",
+    "agent-2",
+    "agent-3",
+    "agent-4",
+    "agent-5",
+    "agent-6"
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "id": "2f1ac5",
+  "type": "fix",
+  "priority": 2,
+  "title": "Bug: 'raise warnings.warn()' in camera.py:507",
+  "description": "camera.py line 507 has 'raise warnings.warn(...)' which is a bug. warnings.warn() returns None, so 'raise None' raises TypeError. The intent was clearly just warnings.warn() without the raise. Remove the 'raise' keyword.",
+  "status": "done",
+  "source": "",
+  "auto_approve": true,
+  "swarm_id": "Fixing raise warnings.warn bug",
+  "branch": null,
+  "result": null,
+  "error": null,
+  "created": "2026-03-31T01:10:19Z",
+  "updated": "2026-03-31T01:10:34Z"
+}
