@@ -1,0 +1,661 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- Resolve omacmux root (works from symlink or direct invocation) ---
+_resolve_root() {
+  local bin="$0"
+  # Follow symlinks (macOS readlink -f equivalent)
+  while [[ -L "$bin" ]]; do
+    local dir; dir="$(cd "$(dirname "$bin")" && pwd)"
+    bin="$(readlink "$bin")"
+    [[ "$bin" != /* ]] && bin="$dir/$bin"
+  done
+  cd "$(dirname "$bin")/.." && pwd
+}
+
+OMACMUX_ROOT="$(_resolve_root)"
+OMACMUX_STATE="${XDG_DATA_HOME:-$HOME/.local/share}/omacmux"
+MANIFEST="$OMACMUX_STATE/manifest"
+BREW_BASH="/opt/homebrew/bin/bash"
+
+source "$OMACMUX_ROOT/links.sh"
+
+# --- Colors ---
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+CYAN='\033[0;36m'; DIM='\033[2m'; BOLD='\033[1m'; NC='\033[0m'
+
+# --- Helpers ---
+
+_info()  { printf "${CYAN}==> %s${NC}\n" "$*"; }
+_ok()    { printf "    ${GREEN}%s${NC} %s\n" "$1" "$2"; }
+_warn()  { printf "    ${YELLOW}%s${NC} %s\n" "$1" "$2"; }
+_err()   { printf "    ${RED}%s${NC} %s\n" "$1" "$2"; }
+_dim()   { printf "    ${DIM}%s${NC}\n" "$*"; }
+
+_file_info() {
+  local path="$1"
+  if [[ -d "$path" ]]; then
+    local count; count=$(find "$path" -type f 2>/dev/null | wc -l | tr -d ' ')
+    echo "directory, ${count} files"
+  elif [[ -f "$path" ]]; then
+    local lines; lines=$(wc -l < "$path" | tr -d ' ')
+    local mod; mod=$(stat -f "%Sm" -t "%Y-%m-%d" "$path" 2>/dev/null || echo "unknown")
+    echo "${lines} lines, modified ${mod}"
+  else
+    echo "unknown"
+  fi
+}
+
+_backup_path() {
+  echo "${1}.omacmux-bak.$(date +%Y%m%d_%H%M%S)"
+}
+
+_manifest_init() {
+  mkdir -p "$OMACMUX_STATE"
+  if [[ ! -f "$MANIFEST" ]]; then
+    printf "# omacmux link manifest — do not edit manually\n" > "$MANIFEST"
+    printf "# format: strategy\\tsource\\ttarget\\tbackup_path\\n" >> "$MANIFEST"
+  fi
+}
+
+_manifest_add() {
+  local strategy="$1" source="$2" target="$3" backup="${4:-}"
+  # Remove any existing entry for this target
+  if [[ -f "$MANIFEST" ]]; then
+    local tmp; tmp=$(grep -v "	${target}	" "$MANIFEST" 2>/dev/null || true)
+    printf "%s\n" "$tmp" > "$MANIFEST"
+  fi
+  printf "%s\t%s\t%s\t%s\n" "$strategy" "$source" "$target" "$backup" >> "$MANIFEST"
+}
+
+_manifest_entries() {
+  [[ -f "$MANIFEST" ]] || return 0
+  grep -v '^#' "$MANIFEST" | grep -v '^$' || true
+}
+
+_is_omacmux_sourced() {
+  local file="$1"
+  [[ -f "$file" ]] && grep -q 'OMACMUX_PATH\|omacmux' "$file" 2>/dev/null
+}
+
+# --- INIT ---
+
+_cmd_init() {
+  local mode="interactive"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --replace-all) mode="replace" ;;
+      --merge-all)   mode="merge" ;;
+      --skip-existing) mode="skip" ;;
+      -h|--help) _init_help; return 0 ;;
+      *) echo "Unknown option: $1"; _init_help; return 1 ;;
+    esac
+    shift
+  done
+
+  _info "omacmux init"
+  echo ""
+  _manifest_init
+
+  # Install Homebrew deps if brew is available
+  if command -v brew &>/dev/null; then
+    _info "Checking Homebrew dependencies..."
+    HOMEBREW_NO_AUTO_UPDATE=1 brew bundle check --file="$OMACMUX_ROOT/Brewfile" &>/dev/null \
+      && _ok "ok" "all dependencies installed" \
+      || {
+        _warn "installing" "missing dependencies..."
+        HOMEBREW_NO_AUTO_UPDATE=1 brew bundle --file="$OMACMUX_ROOT/Brewfile"
+      }
+    echo ""
+  fi
+
+  # Add Homebrew bash to /etc/shells
+  if [[ -f "$BREW_BASH" ]] && ! grep -q "$BREW_BASH" /etc/shells 2>/dev/null; then
+    _warn "sudo" "Adding Homebrew bash to /etc/shells..."
+    echo "$BREW_BASH" | sudo tee -a /etc/shells > /dev/null
+  fi
+
+  # Ensure ~/.local/share/omacmux points to repo
+  mkdir -p "$(dirname "$OMACMUX_STATE")"
+  if [[ -L "$OMACMUX_STATE" ]]; then
+    ln -sf "$OMACMUX_ROOT" "$OMACMUX_STATE"
+  elif [[ -e "$OMACMUX_STATE" && ! -d "$OMACMUX_STATE" ]]; then
+    mv "$OMACMUX_STATE" "$(_backup_path "$OMACMUX_STATE")"
+    ln -s "$OMACMUX_ROOT" "$OMACMUX_STATE"
+  elif [[ ! -e "$OMACMUX_STATE" ]]; then
+    ln -s "$OMACMUX_ROOT" "$OMACMUX_STATE"
+  fi
+
+  _info "Linking config files..."
+  echo ""
+
+  local linked=0 skipped=0 merged=0
+
+  for entry in "${OMACMUX_LINKS[@]}"; do
+    omacmux_parse_link "$entry"
+    local src="$OMACMUX_ROOT/$_source"
+    local dest="$_dest"
+    local strategy="$_strategy"
+
+    # If source doesn't exist, skip
+    if [[ ! -e "$src" ]]; then
+      _warn "skip" "$dest — source missing ($src)"
+      continue
+    fi
+
+    # Already correctly linked
+    if [[ -L "$dest" ]] && [[ "$(readlink "$dest")" == "$src" ]]; then
+      _ok "ok" "$dest"
+      _manifest_add "$strategy" "$src" "$dest" ""
+      linked=$((linked + 1))
+      continue
+    fi
+
+    # Already merged
+    if [[ "$strategy" == "merge" ]] && _is_omacmux_sourced "$dest"; then
+      _ok "ok" "$dest (merged)"
+      _manifest_add "merge" "$src" "$dest" ""
+      merged=$((merged + 1))
+      continue
+    fi
+
+    # No existing file — just link
+    if [[ ! -e "$dest" && ! -L "$dest" ]]; then
+      mkdir -p "$(dirname "$dest")"
+      if [[ "$strategy" == "merge" ]]; then
+        # Create a minimal file that sources omacmux
+        _write_merge_stub "$_source" "$dest"
+        _ok "created" "$dest (merged)"
+        _manifest_add "merge" "$src" "$dest" ""
+        merged=$((merged + 1))
+      else
+        ln -s "$src" "$dest"
+        _ok "linked" "$dest"
+        _manifest_add "$strategy" "$src" "$dest" ""
+        linked=$((linked + 1))
+      fi
+      continue
+    fi
+
+    # --- Conflict: file exists ---
+
+    local action=""
+    case "$mode" in
+      replace) action="r" ;;
+      merge)   [[ "$strategy" == "merge" ]] && action="m" || action="r" ;;
+      skip)    action="s" ;;
+      interactive) action="$(_prompt_conflict "$strategy" "$src" "$dest")" ;;
+    esac
+
+    case "$action" in
+      r)
+        local bak; bak="$(_backup_path "$dest")"
+        if [[ -L "$dest" ]]; then
+          rm "$dest"
+        else
+          mv "$dest" "$bak"
+          _dim "backed up to $(basename "$bak")"
+        fi
+        mkdir -p "$(dirname "$dest")"
+        ln -s "$src" "$dest"
+        _ok "replaced" "$dest"
+        _manifest_add "replace" "$src" "$dest" "$bak"
+        linked=$((linked + 1))
+        ;;
+      m)
+        if [[ "$strategy" == "merge" ]]; then
+          _append_source_line "$_source" "$dest"
+          _ok "merged" "$dest"
+          _manifest_add "merge" "$src" "$dest" ""
+          merged=$((merged + 1))
+        else
+          _warn "skip" "$dest — merge not supported for this file"
+          skipped=$((skipped + 1))
+        fi
+        ;;
+      s)
+        _warn "skip" "$dest"
+        skipped=$((skipped + 1))
+        ;;
+    esac
+  done
+
+  # Copy mesh templates
+  for f in hosts users; do
+    if [[ ! -f "$OMACMUX_ROOT/mesh/${f}.json" && -f "$OMACMUX_ROOT/mesh/${f}.example.json" ]]; then
+      cp "$OMACMUX_ROOT/mesh/${f}.example.json" "$OMACMUX_ROOT/mesh/${f}.json"
+      _ok "created" "mesh/${f}.json from template"
+    fi
+  done
+
+  echo ""
+  _info "Done — ${linked} linked, ${merged} merged, ${skipped} skipped"
+
+  # Git identity prompt (only if not already configured)
+  local git_cfg="$OMACMUX_ROOT/config/git/config"
+  if [[ -f "$git_cfg" ]] && ! grep -q '^\[user\]' "$git_cfg" 2>/dev/null; then
+    echo ""
+    _info "Git identity"
+    read -rp "    Your name for git commits: " git_name
+    read -rp "    Your email for git commits: " git_email
+    if [[ -n "${git_name:-}" && -n "${git_email:-}" ]]; then
+      printf "\n[user]\n\temail = %s\n\tname = %s\n" "$git_email" "$git_name" >> "$git_cfg"
+      _ok "saved" "git identity"
+    else
+      _dim "Skipped — set later with 'git config --global'"
+    fi
+  fi
+
+  # Offer to switch shell
+  if [[ -f "$BREW_BASH" && "${SHELL:-}" != "$BREW_BASH" ]]; then
+    echo ""
+    read -rp "$(printf "${CYAN}==> Set Homebrew bash as default shell? [y/N]${NC} ")" -n 1 reply
+    echo
+    if [[ "${reply:-}" =~ ^[Yy]$ ]]; then
+      chsh -s "$BREW_BASH"
+      _ok "done" "default shell changed to $BREW_BASH"
+    else
+      _dim "Keeping $SHELL. Run 'chsh -s $BREW_BASH' later if needed."
+    fi
+  fi
+
+  echo ""
+  echo "    Open a new terminal, then run:  t"
+  echo ""
+}
+
+_prompt_conflict() {
+  local strategy="$1" src="$2" dest="$3"
+  local info; info="$(_file_info "$dest")"
+
+  printf "\n  ${BOLD}%s${NC}\n" "$dest"
+  printf "    ${YELLOW}conflict${NC} — file exists (${DIM}%s${NC})\n" "$info"
+
+  while true; do
+    if [[ "$strategy" == "merge" ]]; then
+      printf "    [${GREEN}m${NC}] Merge — append 'source omacmux' to your file\n"
+    fi
+    printf "    [${RED}r${NC}] Replace — backup yours, symlink ours\n"
+    printf "    [${CYAN}v${NC}] View diff\n"
+    printf "    [${DIM}s${NC}] Skip\n"
+
+    local default="r"
+    [[ "$strategy" == "merge" ]] && default="m"
+
+    read -rp "    Choice [$default]: " -n 1 choice
+    echo
+    choice="${choice:-$default}"
+
+    case "$choice" in
+      m) [[ "$strategy" == "merge" ]] && { echo "m"; return; } ;;
+      r) echo "r"; return ;;
+      s) echo "s"; return ;;
+      v)
+        echo ""
+        if command -v diff &>/dev/null; then
+          diff --color=auto -u "$dest" "$src" 2>/dev/null | head -60 || true
+        else
+          diff -u "$dest" "$src" 2>/dev/null | head -60 || true
+        fi
+        echo ""
+        ;;
+      *) _dim "Invalid choice. Try again." ;;
+    esac
+  done
+}
+
+_write_merge_stub() {
+  local rel_source="$1" dest="$2"
+  mkdir -p "$(dirname "$dest")"
+  case "$rel_source" in
+    shell/bashrc)
+      cat > "$dest" <<'STUB'
+# omacmux — add your own customizations below the source line
+export OMACMUX_PATH="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"
+[[ $- == *i* ]] && source "$OMACMUX_PATH/shell/bashrc"
+STUB
+      ;;
+    shell/bash_profile)
+      cat > "$dest" <<'STUB'
+[[ -f ~/.bashrc ]] && . ~/.bashrc
+STUB
+      ;;
+    *)
+      # Generic: just source it
+      printf '# omacmux\nsource "%s/%s"\n' '$HOME/.local/share/omacmux' "$rel_source" > "$dest"
+      ;;
+  esac
+}
+
+_append_source_line() {
+  local rel_source="$1" dest="$2"
+  case "$rel_source" in
+    shell/bashrc)
+      printf '\n# omacmux\nexport OMACMUX_PATH="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"\n[[ $- == *i* ]] && source "$OMACMUX_PATH/shell/bashrc"\n' >> "$dest"
+      ;;
+    shell/bash_profile)
+      if ! grep -q '\. ~/.bashrc\|source ~/.bashrc' "$dest" 2>/dev/null; then
+        printf '\n[[ -f ~/.bashrc ]] && . ~/.bashrc\n' >> "$dest"
+      fi
+      ;;
+    *)
+      printf '\n# omacmux\nsource "%s/%s"\n' '$HOME/.local/share/omacmux' "$rel_source" >> "$dest"
+      ;;
+  esac
+}
+
+_init_help() {
+  cat <<EOF
+Usage: omacmux init [OPTIONS]
+
+Set up omacmux config files with interactive conflict resolution.
+
+Options:
+  --replace-all     Replace all existing files (backup originals)
+  --merge-all       Merge where possible, replace the rest
+  --skip-existing   Skip any file that already exists
+  -h, --help        Show this help
+
+When run without options, prompts for each conflicting file.
+EOF
+}
+
+# --- UNLINK ---
+
+_cmd_unlink() {
+  _info "omacmux unlink"
+  echo ""
+
+  if [[ ! -f "$MANIFEST" ]]; then
+    _err "error" "No manifest found — nothing to unlink."
+    return 1
+  fi
+
+  local count=0
+
+  while IFS=$'\t' read -r strategy source target backup; do
+    [[ -z "$target" ]] && continue
+
+    case "$strategy" in
+      replace|additive)
+        if [[ -L "$target" ]]; then
+          rm "$target"
+          if [[ -n "$backup" && -e "$backup" ]]; then
+            mv "$backup" "$target"
+            _ok "restored" "$target"
+          else
+            _ok "removed" "$target"
+          fi
+          count=$((count + 1))
+        else
+          _warn "skip" "$target — not a symlink"
+        fi
+        ;;
+      merge)
+        if [[ -f "$target" ]]; then
+          # Remove omacmux source lines
+          local tmp; tmp=$(mktemp)
+          grep -v 'OMACMUX_PATH\|omacmux/shell/bashrc\|# omacmux' "$target" > "$tmp" 2>/dev/null || true
+          # Only update if we actually removed something
+          if ! diff -q "$target" "$tmp" &>/dev/null; then
+            mv "$tmp" "$target"
+            _ok "cleaned" "$target — removed omacmux source lines"
+            count=$((count + 1))
+          else
+            rm "$tmp"
+            _warn "skip" "$target — no omacmux lines found"
+          fi
+        fi
+        ;;
+    esac
+  done < <(_manifest_entries)
+
+  # Remove state symlink
+  if [[ -L "$OMACMUX_STATE" ]]; then
+    rm "$OMACMUX_STATE"
+    _ok "removed" "~/.local/share/omacmux symlink"
+  fi
+
+  # Clear manifest
+  rm -f "$MANIFEST"
+
+  echo ""
+  _info "Done — $count files unlinked/restored"
+  echo ""
+  _dim "Homebrew packages were NOT removed."
+  _dim "Run 'brew bundle cleanup --file=$OMACMUX_ROOT/Brewfile --force' to remove them."
+}
+
+# --- STATUS ---
+
+_cmd_status() {
+  _info "omacmux status"
+  echo ""
+
+  printf "    %-10s  %-50s  %s\n" "STATE" "TARGET" "STRATEGY"
+  printf "    %-10s  %-50s  %s\n" "-----" "------" "--------"
+
+  for entry in "${OMACMUX_LINKS[@]}"; do
+    omacmux_parse_link "$entry"
+    local src="$OMACMUX_ROOT/$_source"
+    local dest="$_dest"
+    local short_dest="${dest/#$HOME/~}"
+    local state=""
+
+    if [[ -L "$dest" ]] && [[ "$(readlink "$dest")" == "$src" ]]; then
+      state="${GREEN}linked${NC}"
+    elif [[ "$_strategy" == "merge" ]] && _is_omacmux_sourced "$dest"; then
+      state="${GREEN}merged${NC}"
+    elif [[ -e "$dest" ]]; then
+      state="${YELLOW}conflict${NC}"
+    elif [[ -L "$dest" ]]; then
+      state="${RED}broken${NC}"
+    else
+      state="${DIM}missing${NC}"
+    fi
+
+    printf "    ${state}%-4s  %-50s  ${DIM}%s${NC}\n" "" "$short_dest" "$_strategy"
+  done
+  echo ""
+}
+
+# --- DOCTOR ---
+
+_cmd_doctor() {
+  _info "omacmux doctor"
+  echo ""
+  local issues=0
+
+  # Check Homebrew
+  if command -v brew &>/dev/null; then
+    _ok "ok" "Homebrew installed"
+    if HOMEBREW_NO_AUTO_UPDATE=1 brew bundle check --file="$OMACMUX_ROOT/Brewfile" &>/dev/null; then
+      _ok "ok" "all Brewfile dependencies installed"
+    else
+      _err "missing" "some Brewfile dependencies — run 'omacmux init' or 'brew bundle'"
+      issues=$((issues + 1))
+    fi
+  else
+    _err "missing" "Homebrew not installed"
+    issues=$((issues + 1))
+  fi
+
+  # Check bash version
+  local bash_ver; bash_ver="$("${BREW_BASH:-bash}" --version 2>/dev/null | head -1 || echo "")"
+  if [[ "$bash_ver" == *"version 5"* || "$bash_ver" == *"version 4"* ]]; then
+    _ok "ok" "bash 4+ ($(basename "${BREW_BASH:-bash}"))"
+  else
+    _warn "warn" "bash is < 4.0 — some features may not work"
+    issues=$((issues + 1))
+  fi
+
+  # Check shell
+  if [[ "${SHELL:-}" == "$BREW_BASH" ]]; then
+    _ok "ok" "default shell is Homebrew bash"
+  else
+    _warn "info" "default shell is $SHELL (omacmux prefers $BREW_BASH)"
+  fi
+
+  # Check symlinks
+  local broken=0
+  for entry in "${OMACMUX_LINKS[@]}"; do
+    omacmux_parse_link "$entry"
+    local dest="$_dest"
+    if [[ -L "$dest" ]] && [[ ! -e "$dest" ]]; then
+      _err "broken" "$dest -> $(readlink "$dest")"
+      broken=$((broken + 1))
+    fi
+  done
+  if [[ $broken -eq 0 ]]; then
+    _ok "ok" "no broken symlinks"
+  else
+    issues=$((issues + broken))
+  fi
+
+  # Check state dir
+  if [[ -L "$OMACMUX_STATE" && -d "$OMACMUX_STATE" ]]; then
+    _ok "ok" "state directory (~/.local/share/omacmux)"
+  elif [[ -d "$OMACMUX_STATE" ]]; then
+    _warn "warn" "state directory exists but is not a symlink"
+  else
+    _warn "missing" "state directory — run 'omacmux init'"
+    issues=$((issues + 1))
+  fi
+
+  # Check manifest
+  if [[ -f "$MANIFEST" ]]; then
+    local link_count; link_count=$(grep -cv '^#\|^$' "$MANIFEST" 2>/dev/null || echo "0")
+    _ok "ok" "manifest ($link_count entries)"
+  else
+    _warn "missing" "manifest — run 'omacmux init'"
+  fi
+
+  echo ""
+  if [[ $issues -eq 0 ]]; then
+    _info "All checks passed"
+  else
+    _info "$issues issue(s) found"
+  fi
+}
+
+# --- UPGRADE ---
+
+_cmd_upgrade() {
+  _info "omacmux upgrade"
+  echo ""
+
+  # Pull latest
+  _info "Pulling latest changes..."
+  local before; before=$(git -C "$OMACMUX_ROOT" rev-parse HEAD 2>/dev/null || echo "")
+  git -C "$OMACMUX_ROOT" pull --rebase 2>/dev/null || {
+    _warn "skip" "git pull failed (not a git repo or no remote)"
+  }
+  local after; after=$(git -C "$OMACMUX_ROOT" rev-parse HEAD 2>/dev/null || echo "")
+
+  if [[ -n "$before" && "$before" != "$after" ]]; then
+    _ok "updated" "${before:0:7} -> ${after:0:7}"
+    git -C "$OMACMUX_ROOT" log --oneline "${before}..${after}" | sed 's/^/    /'
+  else
+    _ok "ok" "already up to date"
+  fi
+  echo ""
+
+  # Sync deps
+  if command -v brew &>/dev/null; then
+    _info "Syncing Homebrew dependencies..."
+    HOMEBREW_NO_AUTO_UPDATE=1 brew bundle --file="$OMACMUX_ROOT/Brewfile" 2>/dev/null
+    _ok "ok" "dependencies synced"
+    echo ""
+  fi
+
+  # Re-run init in non-interactive mode for new links
+  _info "Syncing config links..."
+  source "$OMACMUX_ROOT/links.sh"
+  _manifest_init
+
+  for entry in "${OMACMUX_LINKS[@]}"; do
+    omacmux_parse_link "$entry"
+    local src="$OMACMUX_ROOT/$_source"
+    local dest="$_dest"
+
+    [[ ! -e "$src" ]] && continue
+
+    # Already correct
+    if [[ -L "$dest" ]] && [[ "$(readlink "$dest")" == "$src" ]]; then
+      continue
+    fi
+    if [[ "$_strategy" == "merge" ]] && _is_omacmux_sourced "$dest"; then
+      continue
+    fi
+
+    # New link that didn't exist before — add it
+    if [[ ! -e "$dest" && ! -L "$dest" ]]; then
+      mkdir -p "$(dirname "$dest")"
+      if [[ "$_strategy" == "merge" ]]; then
+        _write_merge_stub "$_source" "$dest"
+        _ok "new" "$dest (merged)"
+      else
+        ln -s "$src" "$dest"
+        _ok "new" "$dest"
+      fi
+      _manifest_add "$_strategy" "$src" "$dest" ""
+      continue
+    fi
+
+    # Existing conflict — don't touch during upgrade, just report
+    if [[ -e "$dest" ]]; then
+      _warn "conflict" "$dest — run 'omacmux init' to resolve"
+    fi
+  done
+
+  echo ""
+  _info "Upgrade complete"
+}
+
+# --- HELP ---
+
+_cmd_help() {
+  cat <<EOF
+${BOLD}omacmux${NC} — agent-first IDE for macOS
+
+${BOLD}Usage:${NC}
+  omacmux <command> [options]
+
+${BOLD}Commands:${NC}
+  init        Set up config files (interactive conflict resolution)
+  unlink      Remove all omacmux configs, restore backups
+  status      Show current state of all config links
+  upgrade     Pull latest + sync dependencies + update links
+  doctor      Check installation health
+  help        Show this help
+
+${BOLD}Init options:${NC}
+  --replace-all     Non-interactive: replace all existing files
+  --merge-all       Non-interactive: merge shell files, replace the rest
+  --skip-existing   Non-interactive: skip any file that already exists
+
+${BOLD}Install via Homebrew:${NC}
+  brew install aadarwal/omacmux/omacmux
+  omacmux init
+
+${BOLD}Install via git clone:${NC}
+  git clone https://github.com/aadarwal/omacmux.git ~/omacmux
+  ~/omacmux/bin/omacmux init
+EOF
+}
+
+# --- Main dispatch ---
+
+case "${1:-help}" in
+  init)    shift; _cmd_init "$@" ;;
+  unlink)  _cmd_unlink ;;
+  status)  _cmd_status ;;
+  upgrade) _cmd_upgrade ;;
+  doctor)  _cmd_doctor ;;
+  help|-h|--help) _cmd_help ;;
+  *)
+    printf "${RED}Unknown command: %s${NC}\n\n" "$1"
+    _cmd_help
+    exit 1
+    ;;
+esac

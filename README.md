@@ -17,10 +17,21 @@ Everything is a shell function. Everything is composable. Everything is yours to
 
 ## Quick Start
 
+### Option A: Homebrew (recommended)
+
+```bash
+brew install aadarwal/omacmux/omacmux
+omacmux init
+```
+
+### Option B: Git clone
+
 ```bash
 git clone https://github.com/aadarwal/omacmux.git ~/omacmux
-cd ~/omacmux && ./install.sh
+~/omacmux/bin/omacmux init
 ```
+
+`omacmux init` installs dependencies, then walks you through each config file — merge with your existing setup, replace (with backup), or skip. For a fresh machine, use `omacmux init --replace-all`.
 
 Open a **new Ghostty window**, then:
 
@@ -502,21 +513,40 @@ Connect to remote devices for distributed agent swarms.
 
 ## Install / Upgrade / Uninstall
 
-```bash
-./install.sh     # brew deps, symlinks, git identity, shell setup
-./upgrade.sh     # pull latest, install new deps, link new configs
-./uninstall.sh   # remove symlinks, restore backups
-```
+### The `omacmux` CLI
+
+| Command | Description |
+|---------|-------------|
+| `omacmux init` | Interactive setup — deps, config linking, git identity |
+| `omacmux init --replace-all` | Non-interactive: replace all configs (fresh machine) |
+| `omacmux init --merge-all` | Non-interactive: merge shell files, replace the rest |
+| `omacmux init --skip-existing` | Non-interactive: skip any existing config file |
+| `omacmux unlink` | Remove all omacmux configs, restore backups |
+| `omacmux status` | Show current state of all config links |
+| `omacmux upgrade` | Pull latest + sync deps + update links |
+| `omacmux doctor` | Check installation health |
+
+### Config conflict resolution
+
+When `omacmux init` finds an existing config file, it offers three strategies:
+
+- **Merge** (shell files like `~/.bashrc`): appends a `source omacmux` line to your existing file. Your config stays intact.
+- **Replace**: backs up your file (e.g., `~/.bashrc.omacmux-bak.20260408_143022`), then symlinks ours. `omacmux unlink` restores the backup.
+- **Skip**: leaves the file untouched.
+
+### Legacy scripts
+
+`./install.sh`, `./upgrade.sh`, and `./uninstall.sh` still work — they delegate to `omacmux init/upgrade/unlink`.
 
 ### What gets installed
 
 **Tools** (via Homebrew): tmux, bash 5, neovim, starship, eza, fzf, zoxide, bat, ripgrep, fd, mise, gh, jq, tree
 
-**Font**: JetBrains Mono Nerd Font
+**Font** (install separately): `brew install --cask font-jetbrains-mono-nerd-font`
 
-### What gets symlinked
+### What gets linked
 
-All config files are symlinked from the repo to their standard locations (`~/.config/tmux/`, `~/.config/nvim/`, `~/.config/ghostty/`, `~/.bashrc`, etc.). Your originals are backed up with timestamps.
+All config files are linked from the repo to their standard locations (`~/.config/tmux/`, `~/.config/nvim/`, `~/.config/ghostty/`, `~/.bashrc`, etc.). Run `omacmux status` to see the full list and current state.
 
 ---
 
