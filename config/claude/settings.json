@@ -1,0 +1,81 @@
+{
+  "model": "opus[1m]",
+  "theme": "dark",
+  "effortLevel": "high",
+  "skipDangerousModePermissionPrompt": true,
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(brew *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(mise *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(find *)",
+      "Bash(fd *)",
+      "Bash(rg *)",
+      "Bash(jq *)",
+      "Bash(tree *)",
+      "Bash(which *)",
+      "Bash(man *)",
+      "Bash(diff *)",
+      "Bash(sort *)",
+      "Bash(uniq *)",
+      "Bash(cut *)",
+      "Bash(awk *)",
+      "Bash(sed *)",
+      "Bash(tmux *)",
+      "Bash(scan *)",
+      "Bash(scanreport *)",
+      "Bash(swarm *)",
+      "Bash(swarmx *)",
+      "Bash(review *)",
+      "Bash(reviewd *)",
+      "Bash(vibe *)",
+      "Bash(check *)",
+      "Bash(ship *)",
+      "Bash(recap *)",
+      "Bash(tell *)",
+      "Bash(who *)",
+      "Bash(focus *)",
+      "Bash(name *)",
+      "Bash(recipe *)",
+      "Bash(voice *)",
+      "Bash(acm *)",
+      "Bash(taa *)",
+      "Bash(tra *)",
+      "Bash(tscale *)",
+      "Bash(tap *)",
+      "Bash(al *)",
+      "Bash(alw *)",
+      "Bash(pd *)",
+      "Bash(pds *)",
+      "Bash(cfgmap *)",
+      "Bash(cfgedit *)",
+      "Bash(map *)",
+      "Bash(source *)",
+      "Read"
+    ]
+  },
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.local/share/omacmux/config/claude/notify.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "CLAUDE_CODE_SHELL": "/opt/homebrew/bin/bash"
+  }
+}

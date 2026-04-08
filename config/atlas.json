@@ -1,0 +1,21 @@
+{
+  "active_projects": [
+    "~/autoresearch",
+    "~/autoresearch-icl",
+    "~/go",
+    "~/linux",
+    "~/omacmux",
+    "~/omacmux-universal",
+    "~/omarchy",
+    "~/openclaude"
+  ],
+  "desktop_path": "~/Desktop",
+  "drives": [
+    {
+      "name": "aadarwal_vx",
+      "path": "/Volumes/aadarwal_vx"
+    }
+  ],
+  "github_user": "aadarwal",
+  "github_cache_ttl": 300
+}

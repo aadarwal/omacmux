@@ -1,0 +1,435 @@
+# ==============================================================================
+# Atlas: Classified knowledge base navigator
+# ==============================================================================
+#
+# See your entire knowledge landscape organized by classification:
+# local projects, iCloud desktop, external drives, GitHub, remote hosts.
+#
+# Usage:
+#   map                  interactive fzf browser
+#   map active           browse active projects only
+#   map desktop          browse desktop items
+#   map drive            browse external drive
+#   map github           browse github repos
+#   map icloud           browse iCloud
+#   map remote           browse remote hosts
+#   map <name>           search across all classifications
+#   map --print          non-interactive overview
+#   map config           edit atlas configuration
+
+# ------------------------------------------------------------------------------
+# Constants
+# ------------------------------------------------------------------------------
+
+ATLAS_CONFIG="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/config/atlas.json"
+ATLAS_CACHE_DIR="$HOME/.local/share/omacmux/atlas"
+ATLAS_HOSTS="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/mesh/hosts.json"
+
+export ATLAS_CONFIG ATLAS_CACHE_DIR ATLAS_HOSTS
+
+# ------------------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------------------
+
+_atlas_expand() { echo "${1/#\~/$HOME}"; }
+
+# Git one-liner for a directory: branch|age|dirty_indicator
+# Pass "fast" as $2 to skip counting (boolean dirty check only)
+# Returns 1 if not a git repo
+_atlas_git_info() {
+  local d="$1" mode="${2:-full}"
+  [[ -d "$d/.git" ]] || return 1
+  local branch last dirty
+  branch=$(git -C "$d" branch --show-current 2>/dev/null)
+  [[ -z "$branch" ]] && branch="detached"
+  last=$(git -C "$d" log -1 --format="%cr" 2>/dev/null)
+  [[ -z "$last" ]] && last="no commits"
+  if [[ "$mode" == "fast" ]]; then
+    # Boolean check only — exits on first diff, sub-second for any repo size
+    if git -C "$d" diff-index --quiet HEAD -- 2>/dev/null; then
+      dirty=0
+    else
+      dirty="+"
+    fi
+  else
+    dirty=$(git -C "$d" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  fi
+  echo "${branch}|${last}|${dirty}"
+}
+
+# Check if local repo has a github remote
+_atlas_has_github() {
+  git -C "$1" remote get-url origin 2>/dev/null | grep -q github.com
+}
+
+# Cached github repo list (raw JSON)
+_atlas_github_repos() {
+  command -v gh &>/dev/null || return 1
+  mkdir -p "$ATLAS_CACHE_DIR"
+  local f="$ATLAS_CACHE_DIR/github.json"
+  local m="$ATLAS_CACHE_DIR/github.meta"
+  local ttl
+  ttl=$(jq -r '.github_cache_ttl // 300' "$ATLAS_CONFIG" 2>/dev/null)
+
+  if [[ -f "$m" && -f "$f" ]]; then
+    local age=$(( $(date +%s) - $(cat "$m") ))
+    (( age < ttl )) && { cat "$f"; return 0; }
+  fi
+
+  gh repo list --limit 50 --json name,updatedAt,isPrivate 2>/dev/null > "$f" || return 1
+  date +%s > "$m"
+  cat "$f"
+}
+
+# ------------------------------------------------------------------------------
+# Preview (exported for fzf subprocess)
+# ------------------------------------------------------------------------------
+
+_atlas_preview() {
+  local type="$1" path="$2"
+  local R=$'\033[0m' B=$'\033[1m' D=$'\033[2m' C=$'\033[36m' O=$'\033[33m'
+
+  case "$type" in
+    header)
+      printf "${B}%s${R}\n" "$path"
+      ;;
+    repo)
+      printf "${B}%s${R}\n" "$(basename "$path")"
+      printf "${D}%s${R}\n\n" "$path"
+      # Git log
+      git -C "$path" log --oneline --graph --color=always -15 2>/dev/null
+      # Dirty files (capped to avoid slowness on large repos)
+      local status
+      status=$(git -C "$path" diff-index --name-only HEAD -- 2>/dev/null | head -30)
+      if [[ -n "$status" ]]; then
+        local total
+        total=$(echo "$status" | wc -l | tr -d ' ')
+        printf "\n${O}Changed (%s):${R}\n%s\n" "$total" "$status"
+      fi
+      # Check cross-references
+      local remote
+      remote=$(git -C "$path" remote get-url origin 2>/dev/null)
+      if [[ -n "$remote" ]]; then
+        printf "\n${D}Remote: %s${R}\n" "$remote"
+      fi
+      ;;
+    dir)
+      printf "${B}%s${R}\n" "$(basename "$path")"
+      printf "${D}%s${R}\n\n" "$path"
+      ls -lh "$path" 2>/dev/null | head -30
+      ;;
+    file)
+      bat --style=numbers --color=always "$path" 2>/dev/null || head -40 "$path" 2>/dev/null
+      ;;
+    github)
+      printf "${B}GitHub: %s${R}\n\n" "$path"
+      # Check if cloned locally
+      local found=0
+      for loc in "$HOME/$path" "$HOME/Desktop/$path"; do
+        if [[ -d "$loc" ]]; then
+          printf "${C}Local clone:${R} %s\n" "$loc"
+          found=1
+          printf "\n"
+          git -C "$loc" log --oneline --color=always -10 2>/dev/null
+        fi
+      done
+      (( found == 0 )) && printf "${D}Not cloned locally${R}\n"
+      ;;
+    remote)
+      local hosts="${ATLAS_HOSTS}"
+      if [[ -f "$hosts" ]]; then
+        local info
+        info=$(jq -r --arg n "$path" '.[] | select(.name == $n)' "$hosts" 2>/dev/null)
+        if [[ -n "$info" ]]; then
+          printf "${B}%s${R}\n\n" "$path"
+          echo "$info" | jq -r '"Host: \(.host)\nUser: \(.user)\nOS:   \(.os)\n\n\(.description)"' 2>/dev/null
+        fi
+      fi
+      ;;
+  esac
+}
+export -f _atlas_preview
+
+# ------------------------------------------------------------------------------
+# Entry generators — each line: type\tpath\tdisplay (ANSI ok in display)
+# ------------------------------------------------------------------------------
+
+_atlas_entries_active() {
+  local R=$'\033[0m' B=$'\033[1m' D=$'\033[2m'
+  local O=$'\033[33m' C=$'\033[36m' G=$'\033[32m'
+
+  printf "header\tactive\t${B}  ACTIVE PROJECTS${R}\n"
+
+  [[ -f "$ATLAS_CONFIG" ]] || return
+  while IFS= read -r p; do
+    local dir=$(_atlas_expand "$p")
+    local name=$(basename "$dir")
+    [[ -d "$dir" ]] || continue
+
+    local info
+    if info=$(_atlas_git_info "$dir"); then
+      IFS='|' read -r branch last dirty <<< "$info"
+      local ds="${G}clean${R}"
+      [[ "$dirty" == "+" || "$dirty" -gt 0 ]] 2>/dev/null && ds="${O}${dirty}Δ${R}"
+      local gh=""
+      _atlas_has_github "$dir" && gh=" ${D}→ github${R}"
+      printf "repo\t%s\t    ${C}%-22s${R} ${D}%-10s %-14s${R} %b%b\n" \
+        "$dir" "$name" "$branch" "$last" "$ds" "$gh"
+    else
+      printf "dir\t%s\t    ${D}%-22s —${R}\n" "$dir" "$name"
+    fi
+  done < <(jq -r '.active_projects[]' "$ATLAS_CONFIG" 2>/dev/null)
+}
+
+_atlas_entries_desktop() {
+  local R=$'\033[0m' B=$'\033[1m' D=$'\033[2m'
+  local O=$'\033[33m' C=$'\033[36m' G=$'\033[32m'
+
+  local desktop
+  desktop=$(_atlas_expand "$(jq -r '.desktop_path // "~/Desktop"' "$ATLAS_CONFIG" 2>/dev/null)")
+  [[ -d "$desktop" ]] || return
+
+  local total repo_count=0 dir_count=0 file_count=0
+
+  # Count items (skip hidden)
+  for item in "$desktop"/*; do
+    [[ -e "$item" ]] || continue
+    if [[ -d "$item/.git" ]]; then
+      (( repo_count++ ))
+    elif [[ -d "$item" ]]; then
+      (( dir_count++ ))
+    elif [[ -f "$item" ]]; then
+      (( file_count++ ))
+    fi
+  done
+  total=$(( repo_count + dir_count + file_count ))
+
+  printf "header\tdesktop\t${B}  DESKTOP${R} ${D}— %d items (%d repos, %d folders, %d files)${R}\n" \
+    "$total" "$repo_count" "$dir_count" "$file_count"
+
+  # Git repos with status (fast mode — boolean dirty check for large repos)
+  for d in "$desktop"/*/; do
+    [[ -d "$d/.git" ]] || continue
+    local name=$(basename "$d")
+    local info
+    if info=$(_atlas_git_info "$d" fast); then
+      IFS='|' read -r branch last dirty <<< "$info"
+      local ds="${G}clean${R}"
+      [[ "$dirty" == "+" || "$dirty" -gt 0 ]] 2>/dev/null && ds="${O}${dirty}Δ${R}"
+      local gh=""
+      _atlas_has_github "$d" && gh=" ${D}→ github${R}"
+      printf "repo\t%s\t    ${C}%-22s${R} ${D}%-10s %-14s${R} %b%b\n" \
+        "${d%/}" "$name" "$branch" "$last" "$ds" "$gh"
+    fi
+  done
+
+  # Non-repo directories (summary)
+  if (( dir_count > 0 )); then
+    local dirs=()
+    for d in "$desktop"/*/; do
+      [[ -d "$d/.git" ]] && continue
+      [[ -d "$d" ]] && dirs+=("$(basename "$d")")
+    done
+    local preview="${dirs[*]:0:6}"
+    (( ${#dirs[@]} > 6 )) && preview+=" ..."
+    printf "dir\t%s\t    ${D}+%d folders: %s${R}\n" "$desktop" "$dir_count" "$preview"
+  fi
+
+  # Files (summary)
+  if (( file_count > 0 )); then
+    printf "dir\t%s\t    ${D}+%d files${R}\n" "$desktop" "$file_count"
+  fi
+}
+
+_atlas_entries_drives() {
+  local R=$'\033[0m' B=$'\033[1m' D=$'\033[2m' O=$'\033[33m'
+
+  [[ -f "$ATLAS_CONFIG" ]] || return
+  local has_drives
+  has_drives=$(jq -r '.drives | length' "$ATLAS_CONFIG" 2>/dev/null)
+  (( has_drives > 0 )) || return
+
+  jq -r '.drives[] | "\(.name)\t\(.path)"' "$ATLAS_CONFIG" 2>/dev/null | \
+  while IFS=$'\t' read -r name path; do
+    local expanded=$(_atlas_expand "$path")
+    if [[ -d "$expanded" ]]; then
+      printf "header\tdrive\t${B}  %s${R}\n" "${name^^}"
+      for item in "$expanded"/*/; do
+        [[ -d "$item" ]] || continue
+        local dname=$(basename "$item")
+        local count=$(ls "$item" 2>/dev/null | wc -l | tr -d ' ')
+        printf "dir\t%s\t    ${O}%-22s${R} ${D}%s items${R}\n" "${item%/}" "$dname/" "$count"
+      done
+      for item in "$expanded"/*; do
+        [[ -f "$item" ]] || continue
+        printf "file\t%s\t    ${D}%s${R}\n" "$item" "$(basename "$item")"
+      done
+    else
+      printf "header\tdrive\t${B}  %s${R} ${D}— not mounted${R}\n" "${name^^}"
+    fi
+  done
+}
+
+_atlas_entries_github() {
+  local R=$'\033[0m' B=$'\033[1m' D=$'\033[2m'
+  local P=$'\033[35m' C=$'\033[36m'
+
+  local repos
+  repos=$(_atlas_github_repos 2>/dev/null) || {
+    printf "header\tgithub\t${B}  GITHUB${R} ${D}— gh not available${R}\n"
+    return
+  }
+
+  local count
+  count=$(echo "$repos" | jq 'length' 2>/dev/null)
+  printf "header\tgithub\t${B}  GITHUB${R} ${D}— %s repos${R}\n" "$count"
+
+  echo "$repos" | jq -r '.[] | "\(.name)\t\(.updatedAt)\t\(.isPrivate)"' 2>/dev/null | \
+  while IFS=$'\t' read -r name updated private; do
+    local date_short="${updated:0:10}"
+    local vis="${D}public${R}"
+    [[ "$private" == "true" ]] && vis="${P}private${R}"
+    printf "github\t%s\t    ${C}%-24s${R} ${D}%-12s${R} %b\n" "$name" "$name" "$date_short" "$vis"
+  done
+}
+
+_atlas_entries_icloud() {
+  local R=$'\033[0m' B=$'\033[1m' D=$'\033[2m'
+  local icloud="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
+  [[ -d "$icloud" ]] || return
+
+  printf "header\ticloud\t${B}  ICLOUD${R}\n"
+  for d in "$icloud"/*/; do
+    [[ -d "$d" ]] || continue
+    local name=$(basename "$d")
+    printf "dir\t%s\t    ${D}%s/${R}\n" "${d%/}" "$name"
+  done
+}
+
+_atlas_entries_remote() {
+  local R=$'\033[0m' B=$'\033[1m' D=$'\033[2m' C=$'\033[36m'
+
+  [[ -f "$ATLAS_HOSTS" ]] || return
+  local count
+  count=$(jq 'length' "$ATLAS_HOSTS" 2>/dev/null)
+  (( count > 0 )) || return
+
+  printf "header\tremote\t${B}  REMOTE${R}\n"
+  jq -r '.[] | "\(.name)\t\(.description)"' "$ATLAS_HOSTS" 2>/dev/null | \
+  while IFS=$'\t' read -r name desc; do
+    printf "remote\t%s\t    ${C}%-18s${R} ${D}%s  via SSH${R}\n" "$name" "$name" "$desc"
+  done
+}
+
+# Combined entries with visual spacing
+_atlas_entries_all() {
+  _atlas_entries_active
+  _atlas_entries_desktop
+  _atlas_entries_drives
+  _atlas_entries_github
+  _atlas_entries_icloud
+  _atlas_entries_remote
+}
+
+# ------------------------------------------------------------------------------
+# Non-interactive print
+# ------------------------------------------------------------------------------
+
+_atlas_print() {
+  local R=$'\033[0m' B=$'\033[1m' D=$'\033[2m'
+  printf "${B}ATLAS${R}\n"
+  printf "${D}─────────────────────────────────────${R}\n\n"
+  _atlas_entries_all | cut -f3
+  printf "\n"
+}
+
+# ------------------------------------------------------------------------------
+# fzf browser
+# ------------------------------------------------------------------------------
+
+_atlas_browse() {
+  local filter="$1"
+  local entries
+
+  case "$filter" in
+    active)  entries=$(_atlas_entries_active) ;;
+    desktop) entries=$(_atlas_entries_desktop) ;;
+    drive)   entries=$(_atlas_entries_drives) ;;
+    github)  entries=$(_atlas_entries_github) ;;
+    icloud)  entries=$(_atlas_entries_icloud) ;;
+    remote)  entries=$(_atlas_entries_remote) ;;
+    "")      entries=$(_atlas_entries_all) ;;
+    *)       entries=$(_atlas_entries_all | grep -i "$filter") ;;
+  esac
+
+  [[ -z "$entries" ]] && { echo "No entries found."; return 1; }
+
+  local selected
+  selected=$(printf '%s\n' "$entries" \
+    | fzf --ansi --tmux 85%,80% \
+      --delimiter '\t' \
+      --with-nth 3 \
+      --header "enter: open  ctrl-o: finder  esc: close" \
+      --preview '_atlas_preview {1} {2}' \
+      --preview-window "right:50%" \
+      --bind "ctrl-o:execute-silent(open -R {2})" \
+  ) || return 0
+
+  # Parse selection
+  local type path
+  type=$(printf '%s' "$selected" | cut -f1)
+  path=$(printf '%s' "$selected" | cut -f2)
+
+  case "$type" in
+    header)
+      # Drill down into that section
+      map "$path"
+      ;;
+    repo|dir)
+      if [[ -d "$path" ]]; then
+        builtin cd "$path" && echo "$path"
+      fi
+      ;;
+    file)
+      [[ -f "$path" ]] && ${EDITOR:-nvim} "$path"
+      ;;
+    github)
+      # Find local clone or report
+      for loc in "$HOME/$path" "$HOME/Desktop/$path"; do
+        if [[ -d "$loc" ]]; then
+          builtin cd "$loc" && echo "$loc"
+          return 0
+        fi
+      done
+      echo "Not cloned locally: $path"
+      ;;
+    remote)
+      local host user
+      host=$(jq -r --arg n "$path" '.[] | select(.name == $n) | .host' "$ATLAS_HOSTS" 2>/dev/null)
+      user=$(jq -r --arg n "$path" '.[] | select(.name == $n) | .user' "$ATLAS_HOSTS" 2>/dev/null)
+      if [[ -n "$host" && -n "$user" ]]; then
+        echo "ssh ${user}@${host}"
+        ssh "${user}@${host}"
+      fi
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Entry point
+# ------------------------------------------------------------------------------
+
+map() {
+  case "${1:-}" in
+    --print|-p) _atlas_print ;;
+    config)     ${EDITOR:-nvim} "$ATLAS_CONFIG" ;;
+    --help|-h)
+      echo "Usage: map [section|name|--print|config]"
+      echo ""
+      echo "Sections: active, desktop, drive, github, icloud, remote"
+      echo "Options:  --print  non-interactive overview"
+      echo "          config   edit classification config"
+      ;;
+    *) _atlas_browse "$1" ;;
+  esac
+}
