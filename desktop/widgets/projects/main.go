@@ -6,7 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,8 +40,6 @@ var (
 	errStyle      = lipgloss.NewStyle().Foreground(red)
 	sectionStyle  = lipgloss.NewStyle().Foreground(orange).Bold(true)
 	breadStyle    = lipgloss.NewStyle().Foreground(dim)
-
-	_ = cyanStyle
 )
 
 // ---------------------------------------------------------------------------
@@ -51,25 +49,61 @@ var (
 type ViewLevel int
 
 const (
-	LevelRepoList  ViewLevel = iota
-	LevelRepoDetail
-	LevelPRDetail
+	LevelList         ViewLevel = iota // atlas overview
+	LevelRepoDetail                    // repo PRs/branches
+	LevelPRDetail                      // single PR
+	LevelRemoteDetail                  // remote host info
 )
 
 // ---------------------------------------------------------------------------
-// Data types
+// Atlas data types
 // ---------------------------------------------------------------------------
 
-type Repo struct {
-	Name             string `json:"name"`
-	DefaultBranchRef struct {
-		Name string `json:"name"`
-	} `json:"defaultBranchRef"`
-	PushedAt  string `json:"pushedAt"`
-	URL       string `json:"url"`
-	PRCount   int
-	LocalPath string
+type AtlasState struct {
+	GeneratedAt string         `json:"generated_at"`
+	Pinned      []PinnedItem   `json:"pinned"`
+	Sections    []AtlasSection `json:"sections"`
 }
+
+type PinnedItem struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+}
+
+type AtlasSection struct {
+	Section string       `json:"section"`
+	Label   string       `json:"label"`
+	Entries []AtlasEntry `json:"entries"`
+}
+
+type AtlasEntry struct {
+	Type        string `json:"type"`
+	Name        string `json:"name"`
+	Path        string `json:"path,omitempty"`
+	Branch      string `json:"branch,omitempty"`
+	LastCommit  string `json:"last_commit,omitempty"`
+	Dirty       string `json:"dirty,omitempty"`
+	HasGithub   string `json:"has_github,omitempty"`
+	Host        string `json:"host,omitempty"`
+	User        string `json:"user,omitempty"`
+	OS          string `json:"os,omitempty"`
+	Description string `json:"description,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
+	Visibility  string `json:"visibility,omitempty"`
+	LocalPath   string `json:"local_path,omitempty"`
+}
+
+// DisplayItem is a flattened item for rendering in Level 0.
+type DisplayItem struct {
+	IsHeader    bool
+	SectionName string
+	Entry       AtlasEntry
+	PRCount     int
+}
+
+// ---------------------------------------------------------------------------
+// PR/Branch types (for repo drill-down)
+// ---------------------------------------------------------------------------
 
 type PR struct {
 	Number         int    `json:"number"`
@@ -88,19 +122,19 @@ type Branch struct {
 }
 
 type PRDetail struct {
-	Number       int    `json:"number"`
-	Title        string `json:"title"`
-	Body         string `json:"body"`
-	HeadRefName  string `json:"headRefName"`
-	Additions    int    `json:"additions"`
-	Deletions    int    `json:"deletions"`
-	ChangedFiles int    `json:"changedFiles"`
+	Number         int    `json:"number"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	HeadRefName    string `json:"headRefName"`
+	Additions      int    `json:"additions"`
+	Deletions      int    `json:"deletions"`
+	ChangedFiles   int    `json:"changedFiles"`
 	ReviewDecision string `json:"reviewDecision"`
-	URL          string `json:"url"`
-	Author       struct {
+	URL            string `json:"url"`
+	Author         struct {
 		Login string `json:"login"`
 	} `json:"author"`
-	CreatedAt string `json:"createdAt"`
+	CreatedAt         string `json:"createdAt"`
 	StatusCheckRollup []struct {
 		Context    string `json:"context"`
 		State      string `json:"state"`
@@ -109,18 +143,48 @@ type PRDetail struct {
 }
 
 // ---------------------------------------------------------------------------
+// System status types
+// ---------------------------------------------------------------------------
+
+type SwarmFile struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Topology string `json:"topology"`
+	Agents   []struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	} `json:"agents"`
+}
+
+// ---------------------------------------------------------------------------
 // Tea messages
 // ---------------------------------------------------------------------------
 
 type tickMsg time.Time
 
-type repoListMsg struct {
-	repos []Repo
+type atlasStateMsg struct {
+	items []DisplayItem
 	err   error
 }
 
-type cloneMapMsg struct {
-	cloneMap map[string]string
+type ownerMsg struct {
+	owner string
+}
+
+type prCountsMsg struct {
+	counts map[string]int
+}
+
+type systemInfoMsg struct {
+	sessions    int
+	swarmCount  int
+	agentTotal  int
+	agentActive int
+}
+
+type connectMsg struct {
+	name      string
+	reachable bool
 }
 
 type repoDetailMsg struct {
@@ -155,19 +219,24 @@ type model struct {
 	width   int
 	height  int
 
-	cloneMap map[string]string
-
 	// Navigation
 	viewLevel ViewLevel
 
-	// Level 0 — Repo list
-	repos       []Repo
-	repoCursor  int
-	repoLoading bool
-	repoErr     error
+	// Level 0 — Atlas list
+	items   []DisplayItem
+	cursor  int
+	loading bool
+	loadErr error
+
+	// System status (absorbed from status widget)
+	sessions     int
+	swarmCount   int
+	agentTotal   int
+	agentActive  int
+	deviceStatus map[string]bool // device name → reachable
 
 	// Level 1 — Repo detail
-	activeRepo    *Repo
+	activeItem    *DisplayItem
 	prs           []PR
 	branches      []Branch
 	detailSection DetailSection
@@ -187,152 +256,245 @@ func initialModel() model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 	return model{
-		spinner:  s,
-		cloneMap: make(map[string]string),
-		repoLoading: true,
+		spinner:      s,
+		loading:      true,
+		deviceStatus: make(map[string]bool),
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, fetchReposCmd(), detectClonesCmd(), scheduleTickCmd())
+	return tea.Batch(m.spinner.Tick, loadAtlasStateCmd(), fetchOwnerCmd(), fetchSystemInfoCmd(), scheduleTickCmd())
 }
 
 // ---------------------------------------------------------------------------
-// Commands — Level 0
+// Helpers — item accessors
 // ---------------------------------------------------------------------------
 
-func getOwner() (string, error) {
-	out, err := exec.Command("gh", "api", "user", "--jq", ".login").Output()
-	if err != nil {
-		return "", fmt.Errorf("gh api user failed: %w", err)
+func (m model) itemLocalPath() string {
+	if m.activeItem == nil {
+		return ""
 	}
-	return strings.TrimSpace(string(out)), nil
+	if m.activeItem.Entry.Path != "" {
+		return m.activeItem.Entry.Path
+	}
+	return m.activeItem.Entry.LocalPath
 }
 
-func fetchReposCmd() tea.Cmd {
+func (m model) itemIsGithub() bool {
+	if m.activeItem == nil {
+		return false
+	}
+	return m.activeItem.Entry.HasGithub == "true" || m.activeItem.Entry.Type == "github"
+}
+
+func (m model) itemRepoURL() string {
+	if m.owner == "" || m.activeItem == nil {
+		return ""
+	}
+	return fmt.Sprintf("https://github.com/%s/%s", m.owner, m.activeItem.Entry.Name)
+}
+
+// Snap cursor to nearest selectable item (skip headers).
+func (m *model) snapCursorToSelectable() {
+	if len(m.items) == 0 {
+		m.cursor = 0
+		return
+	}
+	if m.cursor >= len(m.items) {
+		m.cursor = len(m.items) - 1
+	}
+	if m.items[m.cursor].IsHeader {
+		m.moveCursorDown()
+	}
+}
+
+func (m *model) moveCursorDown() {
+	start := m.cursor
+	for {
+		if m.cursor >= len(m.items)-1 {
+			m.cursor = start // don't move past end
+			return
+		}
+		m.cursor++
+		if !m.items[m.cursor].IsHeader {
+			return
+		}
+	}
+}
+
+func (m *model) moveCursorUp() {
+	start := m.cursor
+	for {
+		if m.cursor <= 0 {
+			m.cursor = start
+			return
+		}
+		m.cursor--
+		if !m.items[m.cursor].IsHeader {
+			return
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Commands — Atlas state
+// ---------------------------------------------------------------------------
+
+func getAtlasStatePath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "omacmux", "atlas", "state.json")
+}
+
+func getOmacmuxPath() string {
+	if p := os.Getenv("OMACMUX_PATH"); p != "" {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "omacmux")
+}
+
+func loadAtlasStateCmd() tea.Cmd {
 	return func() tea.Msg {
-		owner, err := getOwner()
+		statePath := getAtlasStatePath()
+
+		// Try cached state first
+		data, err := os.ReadFile(statePath)
+		if err != nil || len(data) == 0 {
+			// No cache — generate fresh
+			data, err = refreshAtlasState()
+			if err != nil {
+				return atlasStateMsg{err: fmt.Errorf("atlas: %w", err)}
+			}
+		} else {
+			// If stale (>5 min), trigger background refresh but use stale data now
+			if info, serr := os.Stat(statePath); serr == nil {
+				if time.Since(info.ModTime()) > 5*time.Minute {
+					go refreshAtlasState()
+				}
+			}
+		}
+
+		var state AtlasState
+		if err := json.Unmarshal(data, &state); err != nil {
+			return atlasStateMsg{err: fmt.Errorf("parse state.json: %w", err)}
+		}
+
+		return atlasStateMsg{items: buildDisplayItems(state)}
+	}
+}
+
+func refreshAndLoadCmd() tea.Cmd {
+	return func() tea.Msg {
+		data, err := refreshAtlasState()
 		if err != nil {
-			return repoListMsg{err: err}
+			// Fall back to cached file
+			data, err = os.ReadFile(getAtlasStatePath())
+			if err != nil {
+				return atlasStateMsg{err: fmt.Errorf("atlas refresh: %w", err)}
+			}
 		}
 
-		out, err := exec.Command("gh", "repo", "list",
-			"--json", "name,defaultBranchRef,pushedAt,url",
-			"--limit", "15",
-			"--source",
-		).CombinedOutput()
+		var state AtlasState
+		if err := json.Unmarshal(data, &state); err != nil {
+			return atlasStateMsg{err: fmt.Errorf("parse: %w", err)}
+		}
+
+		return atlasStateMsg{items: buildDisplayItems(state)}
+	}
+}
+
+func refreshAtlasState() ([]byte, error) {
+	omx := getOmacmuxPath()
+	atlasFile := filepath.Join(omx, "config", "bash", "fns", "atlas")
+	cmd := exec.Command("bash", "-c",
+		fmt.Sprintf("export OMACMUX_PATH='%s' && source '%s' && map --json 2>/dev/null", omx, atlasFile))
+	return cmd.Output()
+}
+
+func buildDisplayItems(state AtlasState) []DisplayItem {
+	var items []DisplayItem
+
+	// Build pinned lookup: type/name → true
+	pinnedSet := make(map[string]bool)
+	for _, p := range state.Pinned {
+		pinnedSet[p.Type+"/"+p.Name] = true
+	}
+
+	for _, section := range state.Sections {
+		var sectionItems []DisplayItem
+
+		for _, entry := range section.Entries {
+			if section.Section == "active" {
+				// Active projects: always shown
+				sectionItems = append(sectionItems, DisplayItem{Entry: entry})
+			} else if pinnedSet[entry.Type+"/"+entry.Name] {
+				// Other sections: only show pinned items
+				sectionItems = append(sectionItems, DisplayItem{Entry: entry})
+			}
+		}
+
+		if len(sectionItems) > 0 {
+			items = append(items, DisplayItem{
+				IsHeader:    true,
+				SectionName: section.Label,
+			})
+			items = append(items, sectionItems...)
+		}
+	}
+
+	return items
+}
+
+func fetchOwnerCmd() tea.Cmd {
+	return func() tea.Msg {
+		out, err := exec.Command("gh", "api", "user", "--jq", ".login").Output()
 		if err != nil {
-			return repoListMsg{err: fmt.Errorf("gh: %s", strings.TrimSpace(string(out)))}
+			return ownerMsg{}
 		}
+		return ownerMsg{owner: strings.TrimSpace(string(out))}
+	}
+}
 
-		var repos []Repo
-		if err := json.Unmarshal(out, &repos); err != nil {
-			return repoListMsg{err: fmt.Errorf("JSON parse: %w", err)}
-		}
-
-		sort.Slice(repos, func(i, j int) bool {
-			ti, _ := time.Parse(time.RFC3339, repos[i].PushedAt)
-			tj, _ := time.Parse(time.RFC3339, repos[j].PushedAt)
-			return ti.After(tj)
-		})
-
-		// Fetch PR counts in parallel
+func fetchPRCountsCmd(owner string, items []DisplayItem) tea.Cmd {
+	return func() tea.Msg {
+		counts := make(map[string]int)
+		var mu sync.Mutex
 		var wg sync.WaitGroup
-		for i := range repos {
+
+		for _, item := range items {
+			if item.IsHeader {
+				continue
+			}
+			isGH := item.Entry.HasGithub == "true" || item.Entry.Type == "github"
+			if !isGH {
+				continue
+			}
+			name := item.Entry.Name
 			wg.Add(1)
-			go func(idx int) {
+			go func(repoName string) {
 				defer wg.Done()
-				fullName := owner + "/" + repos[idx].Name
-				prOut, prErr := exec.Command("gh", "pr", "list",
+				fullName := owner + "/" + repoName
+				out, err := exec.Command("gh", "pr", "list",
 					"--repo", fullName,
 					"--state", "open",
 					"--json", "number",
 					"--limit", "100",
 				).Output()
-				if prErr != nil {
+				if err != nil {
 					return
 				}
 				var prs []struct{ Number int }
-				if json.Unmarshal(prOut, &prs) == nil {
-					repos[idx].PRCount = len(prs)
+				if json.Unmarshal(out, &prs) == nil {
+					mu.Lock()
+					counts[repoName] = len(prs)
+					mu.Unlock()
 				}
-			}(i)
+			}(name)
 		}
 		wg.Wait()
 
-		return repoListMsg{repos: repos}
+		return prCountsMsg{counts: counts}
 	}
-}
-
-func detectClonesCmd() tea.Cmd {
-	return func() tea.Msg {
-		cloneMap := make(map[string]string)
-		home, _ := os.UserHomeDir()
-
-		searchDirs := []string{home}
-		// Also check common code directories
-		for _, sub := range []string{"code", "projects", "src", "dev", "repos", "Desktop", "Documents"} {
-			p := filepath.Join(home, sub)
-			if info, err := os.Stat(p); err == nil && info.IsDir() {
-				searchDirs = append(searchDirs, p)
-			}
-		}
-
-		for _, base := range searchDirs {
-			entries, err := os.ReadDir(base)
-			if err != nil {
-				continue
-			}
-			for _, e := range entries {
-				if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-					continue
-				}
-				dir := filepath.Join(base, e.Name())
-				gitDir := filepath.Join(dir, ".git")
-				if _, err := os.Stat(gitDir); err != nil {
-					continue
-				}
-				out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
-				if err != nil {
-					continue
-				}
-				name := extractRepoName(strings.TrimSpace(string(out)))
-				if name != "" {
-					// Prefer shorter paths (closer to $HOME)
-					if existing, ok := cloneMap[name]; !ok || len(dir) < len(existing) {
-						cloneMap[name] = dir
-					}
-				}
-			}
-		}
-
-		return cloneMapMsg{cloneMap: cloneMap}
-	}
-}
-
-func extractRepoName(remoteURL string) string {
-	// Handle SSH: git@github.com:user/repo.git
-	if idx := strings.LastIndex(remoteURL, ":"); idx > 0 && strings.Contains(remoteURL, "@") {
-		path := remoteURL[idx+1:]
-		path = strings.TrimSuffix(path, ".git")
-		parts := strings.Split(path, "/")
-		if len(parts) >= 2 {
-			return parts[len(parts)-1]
-		}
-	}
-	// Handle HTTPS: https://github.com/user/repo.git
-	if strings.Contains(remoteURL, "://") {
-		path := remoteURL
-		if idx := strings.Index(path, "://"); idx >= 0 {
-			path = path[idx+3:]
-		}
-		path = strings.TrimSuffix(path, ".git")
-		parts := strings.Split(path, "/")
-		if len(parts) >= 3 {
-			return parts[len(parts)-1]
-		}
-	}
-	return ""
 }
 
 func scheduleTickCmd() tea.Cmd {
@@ -342,7 +504,61 @@ func scheduleTickCmd() tea.Cmd {
 }
 
 // ---------------------------------------------------------------------------
-// Commands — Level 1
+// Commands — System status (absorbed from status widget)
+// ---------------------------------------------------------------------------
+
+func fetchSystemInfoCmd() tea.Cmd {
+	return func() tea.Msg {
+		var info systemInfoMsg
+
+		// Tmux sessions
+		out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+		if err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if line != "" {
+					info.sessions++
+				}
+			}
+		}
+
+		// Swarms
+		home, _ := os.UserHomeDir()
+		swarmGlob := filepath.Join(home, ".local", "share", "omacmux", "swarms", "*", "swarm.json")
+		matches, _ := filepath.Glob(swarmGlob)
+		for _, path := range matches {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			var sf SwarmFile
+			if json.Unmarshal(data, &sf) != nil {
+				continue
+			}
+			info.swarmCount++
+			info.agentTotal += len(sf.Agents)
+			for _, a := range sf.Agents {
+				if a.Status == "active" {
+					info.agentActive++
+				}
+			}
+		}
+
+		return info
+	}
+}
+
+func checkConnectivityCmd(name, host string, port int) tea.Cmd {
+	return func() tea.Msg {
+		if port == 0 {
+			port = 22
+		}
+		err := exec.Command("nc", "-z", "-w", "1", host, fmt.Sprintf("%d", port)).Run()
+		return connectMsg{name: name, reachable: err == nil}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Commands — Level 1 (repo detail)
 // ---------------------------------------------------------------------------
 
 func fetchRepoDetailCmd(owner, repoName string) tea.Cmd {
@@ -377,7 +593,6 @@ func fetchRepoDetailCmd(owner, repoName string) tea.Cmd {
 				"-q", ".[:10]",
 			).Output()
 			if err != nil {
-				// Fallback: try simpler approach
 				out2, err2 := exec.Command("gh", "api",
 					fmt.Sprintf("repos/%s/branches?per_page=10", fullName),
 				).Output()
@@ -399,8 +614,24 @@ func fetchRepoDetailCmd(owner, repoName string) tea.Cmd {
 	}
 }
 
+func fetchLocalBranchesCmd(localPath string) tea.Cmd {
+	return func() tea.Msg {
+		out, err := exec.Command("git", "-C", localPath, "branch", "--format=%(refname:short)").Output()
+		if err != nil {
+			return repoDetailMsg{}
+		}
+		var branches []Branch
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if line != "" {
+				branches = append(branches, Branch{Name: line})
+			}
+		}
+		return repoDetailMsg{branches: branches}
+	}
+}
+
 // ---------------------------------------------------------------------------
-// Commands — Level 2
+// Commands — Level 2 (PR detail)
 // ---------------------------------------------------------------------------
 
 func fetchPRDetailCmd(owner, repoName string, prNumber int) tea.Cmd {
@@ -433,14 +664,14 @@ func openBrowserCmd(url string) tea.Cmd {
 	}
 }
 
-func shellInRepoCmd(localPath string) tea.Cmd {
+func shellInPathCmd(localPath string) tea.Cmd {
 	return func() tea.Msg {
 		_ = exec.Command("tmux", "new-window", "-n", filepath.Base(localPath), "-c", localPath).Start()
 		return nil
 	}
 }
 
-func agentInRepoCmd(localPath string) tea.Cmd {
+func agentInPathCmd(localPath string) tea.Cmd {
 	return func() tea.Msg {
 		_ = exec.Command("tmux", "new-window", "-n", filepath.Base(localPath)+"-ai", "-c", localPath,
 			"bash", "-ic", "cxx").Start()
@@ -484,6 +715,24 @@ func agentOnPRCmd(localPath string, prNumber int) tea.Cmd {
 	}
 }
 
+func launchAtlasCmd() tea.Cmd {
+	return func() tea.Msg {
+		omx := getOmacmuxPath()
+		atlasFile := filepath.Join(omx, "config", "bash", "fns", "atlas")
+		_ = exec.Command("tmux", "new-window", "-n", "atlas",
+			"bash", "-ic", fmt.Sprintf("source '%s' && map", atlasFile)).Start()
+		return nil
+	}
+}
+
+func sshRemoteCmd(name, host, user string) tea.Cmd {
+	return func() tea.Msg {
+		_ = exec.Command("tmux", "new-window", "-n", "ssh-"+name,
+			"ssh", fmt.Sprintf("%s@%s", user, host)).Start()
+		return nil
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Update
 // ---------------------------------------------------------------------------
@@ -502,41 +751,62 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tickMsg:
-		m.repoLoading = true
-		m.repoErr = nil
-		return m, tea.Batch(m.spinner.Tick, fetchReposCmd(), scheduleTickCmd())
+		m.loading = true
+		m.loadErr = nil
+		return m, tea.Batch(m.spinner.Tick, refreshAndLoadCmd(), fetchSystemInfoCmd(), scheduleTickCmd())
 
-	case repoListMsg:
-		m.repoLoading = false
+	case atlasStateMsg:
+		m.loading = false
 		if msg.err != nil {
-			m.repoErr = msg.err
+			m.loadErr = msg.err
 		} else {
-			// Preserve owner from first successful fetch
-			if m.owner == "" {
-				if o, err := getOwner(); err == nil {
-					m.owner = o
+			m.items = msg.items
+			m.loadErr = nil
+			if m.cursor >= len(m.items) {
+				m.cursor = maxInt(0, len(m.items)-1)
+			}
+			m.snapCursorToSelectable()
+			// Fire connectivity probes for remote entries
+			var cmds []tea.Cmd
+			for _, item := range m.items {
+				if item.Entry.Type == "remote" && item.Entry.Host != "" {
+					cmds = append(cmds, checkConnectivityCmd(item.Entry.Name, item.Entry.Host, 22))
 				}
 			}
-			m.repos = msg.repos
-			m.repoErr = nil
-			// Merge clone paths
-			for i := range m.repos {
-				if p, ok := m.cloneMap[m.repos[i].Name]; ok {
-					m.repos[i].LocalPath = p
-				}
+			// Fetch PR counts if owner is known
+			if m.owner != "" {
+				cmds = append(cmds, fetchPRCountsCmd(m.owner, m.items))
 			}
-			if m.repoCursor >= len(m.repos) {
-				m.repoCursor = maxInt(0, len(m.repos)-1)
+			if len(cmds) > 0 {
+				return m, tea.Batch(cmds...)
 			}
 		}
 		return m, nil
 
-	case cloneMapMsg:
-		m.cloneMap = msg.cloneMap
-		// Merge into existing repos
-		for i := range m.repos {
-			if p, ok := m.cloneMap[m.repos[i].Name]; ok {
-				m.repos[i].LocalPath = p
+	case ownerMsg:
+		if msg.owner != "" {
+			m.owner = msg.owner
+			if len(m.items) > 0 {
+				return m, fetchPRCountsCmd(m.owner, m.items)
+			}
+		}
+		return m, nil
+
+	case systemInfoMsg:
+		m.sessions = msg.sessions
+		m.swarmCount = msg.swarmCount
+		m.agentTotal = msg.agentTotal
+		m.agentActive = msg.agentActive
+		return m, nil
+
+	case connectMsg:
+		m.deviceStatus[msg.name] = msg.reachable
+		return m, nil
+
+	case prCountsMsg:
+		for i := range m.items {
+			if count, ok := msg.counts[m.items[i].Entry.Name]; ok {
+				m.items[i].PRCount = count
 			}
 		}
 		return m, nil
@@ -564,12 +834,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch m.viewLevel {
-		case LevelRepoList:
-			return m.updateRepoList(msg)
+		case LevelList:
+			return m.updateList(msg)
 		case LevelRepoDetail:
 			return m.updateRepoDetail(msg)
 		case LevelPRDetail:
 			return m.updatePRDetail(msg)
+		case LevelRemoteDetail:
+			return m.updateRemoteDetail(msg)
 		}
 	}
 
@@ -577,28 +849,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// Update — Level 0
+// Update — Level 0 (atlas list)
 // ---------------------------------------------------------------------------
 
-func (m model) updateRepoList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 
 	case "j", "down":
-		if m.repoCursor < len(m.repos)-1 {
-			m.repoCursor++
-		}
+		m.moveCursorDown()
 
 	case "k", "up":
-		if m.repoCursor > 0 {
-			m.repoCursor--
-		}
+		m.moveCursorUp()
 
 	case "enter":
-		if len(m.repos) > 0 && m.owner != "" {
-			repo := m.repos[m.repoCursor]
-			m.activeRepo = &repo
+		if m.cursor >= len(m.items) || m.items[m.cursor].IsHeader {
+			break
+		}
+		item := m.items[m.cursor]
+		switch item.Entry.Type {
+		case "repo":
+			m.activeItem = &item
 			m.viewLevel = LevelRepoDetail
 			m.detailLoading = true
 			m.detailCursor = 0
@@ -606,45 +878,94 @@ func (m model) updateRepoList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.prs = nil
 			m.branches = nil
 			m.detailErr = nil
-			return m, tea.Batch(m.spinner.Tick, fetchRepoDetailCmd(m.owner, repo.Name))
+			cmds := []tea.Cmd{m.spinner.Tick}
+			if m.owner != "" && item.Entry.HasGithub == "true" {
+				cmds = append(cmds, fetchRepoDetailCmd(m.owner, item.Entry.Name))
+			} else if item.Entry.Path != "" {
+				cmds = append(cmds, fetchLocalBranchesCmd(item.Entry.Path))
+			}
+			return m, tea.Batch(cmds...)
+
+		case "github":
+			m.activeItem = &item
+			m.viewLevel = LevelRepoDetail
+			m.detailLoading = true
+			m.detailCursor = 0
+			m.detailSection = SectionPRs
+			m.prs = nil
+			m.branches = nil
+			m.detailErr = nil
+			cmds := []tea.Cmd{m.spinner.Tick}
+			if m.owner != "" {
+				cmds = append(cmds, fetchRepoDetailCmd(m.owner, item.Entry.Name))
+			}
+			return m, tea.Batch(cmds...)
+
+		case "remote":
+			m.activeItem = &item
+			m.viewLevel = LevelRemoteDetail
+			return m, nil
 		}
 
 	case "o":
-		if len(m.repos) > 0 {
-			return m, openBrowserCmd(m.repos[m.repoCursor].URL)
+		if m.cursor < len(m.items) && !m.items[m.cursor].IsHeader {
+			item := m.items[m.cursor]
+			switch item.Entry.Type {
+			case "repo":
+				if item.Entry.HasGithub == "true" && m.owner != "" {
+					return m, openBrowserCmd(fmt.Sprintf("https://github.com/%s/%s", m.owner, item.Entry.Name))
+				}
+			case "github":
+				if m.owner != "" {
+					return m, openBrowserCmd(fmt.Sprintf("https://github.com/%s/%s", m.owner, item.Entry.Name))
+				}
+			}
 		}
 
 	case "e":
-		if len(m.repos) > 0 {
-			repo := m.repos[m.repoCursor]
-			if repo.LocalPath != "" {
-				return m, shellInRepoCmd(repo.LocalPath)
-			} else if m.owner != "" {
-				return m, cloneAndOpenCmd(m.owner, repo.Name)
+		if m.cursor < len(m.items) && !m.items[m.cursor].IsHeader {
+			item := m.items[m.cursor]
+			path := item.Entry.Path
+			if path == "" {
+				path = item.Entry.LocalPath
+			}
+			if path != "" {
+				return m, shellInPathCmd(path)
+			} else if item.Entry.Type == "github" && m.owner != "" {
+				return m, cloneAndOpenCmd(m.owner, item.Entry.Name)
+			} else if item.Entry.Type == "remote" && item.Entry.Host != "" {
+				return m, sshRemoteCmd(item.Entry.Name, item.Entry.Host, item.Entry.User)
 			}
 		}
 
 	case "a":
-		if len(m.repos) > 0 {
-			repo := m.repos[m.repoCursor]
-			if repo.LocalPath != "" {
-				return m, agentInRepoCmd(repo.LocalPath)
-			} else if m.owner != "" {
-				return m, cloneAndOpenCmd(m.owner, repo.Name)
+		if m.cursor < len(m.items) && !m.items[m.cursor].IsHeader {
+			item := m.items[m.cursor]
+			path := item.Entry.Path
+			if path == "" {
+				path = item.Entry.LocalPath
+			}
+			if path != "" {
+				return m, agentInPathCmd(path)
+			} else if item.Entry.Type == "github" && m.owner != "" {
+				return m, cloneAndOpenCmd(m.owner, item.Entry.Name)
 			}
 		}
 
+	case "m":
+		return m, launchAtlasCmd()
+
 	case "r":
-		m.repoLoading = true
-		m.repoErr = nil
-		return m, tea.Batch(m.spinner.Tick, fetchReposCmd(), detectClonesCmd())
+		m.loading = true
+		m.loadErr = nil
+		return m, tea.Batch(m.spinner.Tick, refreshAndLoadCmd())
 	}
 
 	return m, nil
 }
 
 // ---------------------------------------------------------------------------
-// Update — Level 1
+// Update — Level 1 (repo detail)
 // ---------------------------------------------------------------------------
 
 func (m model) updateRepoDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -653,8 +974,8 @@ func (m model) updateRepoDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "esc", "backspace":
-		m.viewLevel = LevelRepoList
-		m.activeRepo = nil
+		m.viewLevel = LevelList
+		m.activeItem = nil
 		return m, nil
 
 	case "j", "down":
@@ -690,17 +1011,20 @@ func (m model) updateRepoDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.prLoading = true
 			m.prDetail = nil
 			m.prErr = nil
-			return m, tea.Batch(m.spinner.Tick, fetchPRDetailCmd(m.owner, m.activeRepo.Name, pr.Number))
+			if m.owner != "" && m.activeItem != nil {
+				return m, tea.Batch(m.spinner.Tick, fetchPRDetailCmd(m.owner, m.activeItem.Entry.Name, pr.Number))
+			}
 		}
 		if m.detailSection == SectionBranches && m.detailCursor < len(m.branches) {
 			branch := m.branches[m.detailCursor]
-			if m.activeRepo.LocalPath != "" {
+			localPath := m.itemLocalPath()
+			if localPath != "" {
+				name := filepath.Base(localPath) + "/" + branch.Name
+				if len(name) > 20 {
+					name = branch.Name
+				}
 				return m, func() tea.Msg {
-					name := filepath.Base(m.activeRepo.LocalPath) + "/" + branch.Name
-					if len(name) > 20 {
-						name = branch.Name
-					}
-					_ = exec.Command("tmux", "new-window", "-n", name, "-c", m.activeRepo.LocalPath,
+					_ = exec.Command("tmux", "new-window", "-n", name, "-c", localPath,
 						"bash", "-ic", fmt.Sprintf("git checkout %s 2>/dev/null || git checkout -b %s && exec bash", branch.Name, branch.Name)).Start()
 					return nil
 				}
@@ -708,38 +1032,34 @@ func (m model) updateRepoDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "e":
-		if m.activeRepo != nil {
-			if m.activeRepo.LocalPath != "" {
-				return m, shellInRepoCmd(m.activeRepo.LocalPath)
-			} else if m.owner != "" {
-				return m, cloneAndOpenCmd(m.owner, m.activeRepo.Name)
-			}
+		if localPath := m.itemLocalPath(); localPath != "" {
+			return m, shellInPathCmd(localPath)
+		} else if m.owner != "" && m.activeItem != nil {
+			return m, cloneAndOpenCmd(m.owner, m.activeItem.Entry.Name)
 		}
 
 	case "a":
-		if m.activeRepo != nil {
-			if m.activeRepo.LocalPath != "" {
-				return m, agentInRepoCmd(m.activeRepo.LocalPath)
-			} else if m.owner != "" {
-				return m, cloneAndOpenCmd(m.owner, m.activeRepo.Name)
-			}
+		if localPath := m.itemLocalPath(); localPath != "" {
+			return m, agentInPathCmd(localPath)
+		} else if m.owner != "" && m.activeItem != nil {
+			return m, cloneAndOpenCmd(m.owner, m.activeItem.Entry.Name)
 		}
 
 	case "s":
-		if m.activeRepo != nil && m.activeRepo.LocalPath != "" {
-			return m, scanRepoCmd(m.activeRepo.LocalPath)
+		if localPath := m.itemLocalPath(); localPath != "" {
+			return m, scanRepoCmd(localPath)
 		}
 
 	case "o":
-		if m.activeRepo != nil {
-			return m, openBrowserCmd(m.activeRepo.URL)
+		if url := m.itemRepoURL(); url != "" {
+			return m, openBrowserCmd(url)
 		}
 
 	case "r":
-		if m.activeRepo != nil && m.owner != "" {
+		if m.activeItem != nil && m.owner != "" && m.itemIsGithub() {
 			m.detailLoading = true
 			m.detailErr = nil
-			return m, tea.Batch(m.spinner.Tick, fetchRepoDetailCmd(m.owner, m.activeRepo.Name))
+			return m, tea.Batch(m.spinner.Tick, fetchRepoDetailCmd(m.owner, m.activeItem.Entry.Name))
 		}
 	}
 
@@ -763,7 +1083,7 @@ func (m *model) clampDetailCursor() {
 }
 
 // ---------------------------------------------------------------------------
-// Update — Level 2
+// Update — Level 2 (PR detail)
 // ---------------------------------------------------------------------------
 
 func (m model) updatePRDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -778,28 +1098,66 @@ func (m model) updatePRDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "e":
-		if m.activeRepo != nil && m.activePR != nil {
-			if m.activeRepo.LocalPath != "" {
-				return m, checkoutPRCmd(m.activeRepo.LocalPath, m.activePR.Number)
+		if m.activeItem != nil && m.activePR != nil {
+			if localPath := m.itemLocalPath(); localPath != "" {
+				return m, checkoutPRCmd(localPath, m.activePR.Number)
 			} else if m.owner != "" {
-				return m, cloneAndOpenCmd(m.owner, m.activeRepo.Name)
+				return m, cloneAndOpenCmd(m.owner, m.activeItem.Entry.Name)
 			}
 		}
 
 	case "a":
-		if m.activeRepo != nil && m.activePR != nil {
-			if m.activeRepo.LocalPath != "" {
-				return m, agentOnPRCmd(m.activeRepo.LocalPath, m.activePR.Number)
+		if m.activeItem != nil && m.activePR != nil {
+			if localPath := m.itemLocalPath(); localPath != "" {
+				return m, agentOnPRCmd(localPath, m.activePR.Number)
 			} else if m.owner != "" {
-				return m, cloneAndOpenCmd(m.owner, m.activeRepo.Name)
+				return m, cloneAndOpenCmd(m.owner, m.activeItem.Entry.Name)
 			}
 		}
 
 	case "o":
 		if m.prDetail != nil && m.prDetail.URL != "" {
 			return m, openBrowserCmd(m.prDetail.URL)
-		} else if m.activeRepo != nil {
-			return m, openBrowserCmd(m.activeRepo.URL)
+		} else if url := m.itemRepoURL(); url != "" {
+			return m, openBrowserCmd(url)
+		}
+	}
+
+	return m, nil
+}
+
+// ---------------------------------------------------------------------------
+// Update — Remote detail
+// ---------------------------------------------------------------------------
+
+func (m model) updateRemoteDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+
+	case "esc", "backspace":
+		m.viewLevel = LevelList
+		m.activeItem = nil
+		return m, nil
+
+	case "e":
+		if m.activeItem != nil {
+			e := m.activeItem.Entry
+			if e.Host != "" && e.User != "" {
+				return m, sshRemoteCmd(e.Name, e.Host, e.User)
+			}
+		}
+
+	case "a":
+		if m.activeItem != nil {
+			e := m.activeItem.Entry
+			if e.Host != "" && e.User != "" {
+				return m, func() tea.Msg {
+					_ = exec.Command("tmux", "new-window", "-n", "ssh-"+e.Name+"-ai",
+						"bash", "-ic", fmt.Sprintf("ssh %s@%s -t 'claude'", e.User, e.Host)).Start()
+					return nil
+				}
+			}
 		}
 	}
 
@@ -812,21 +1170,23 @@ func (m model) updatePRDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	switch m.viewLevel {
-	case LevelRepoList:
-		return m.viewRepoList()
+	case LevelList:
+		return m.viewList()
 	case LevelRepoDetail:
 		return m.viewRepoDetail()
 	case LevelPRDetail:
 		return m.viewPRDetail()
+	case LevelRemoteDetail:
+		return m.viewRemoteDetail()
 	}
 	return ""
 }
 
 // ---------------------------------------------------------------------------
-// View — Level 0
+// View — Level 0 (atlas list)
 // ---------------------------------------------------------------------------
 
-func (m model) viewRepoList() string {
+func (m model) viewList() string {
 	var b strings.Builder
 	w := m.width
 	if w <= 0 {
@@ -834,101 +1194,221 @@ func (m model) viewRepoList() string {
 	}
 
 	// Title row
-	title := titleStyle.Render("  Projects")
+	title := titleStyle.Render("  Atlas")
+	count := 0
+	for _, item := range m.items {
+		if !item.IsHeader {
+			count++
+		}
+	}
 	countStr := ""
-	if len(m.repos) > 0 {
-		countStr = dimStyle.Render(fmt.Sprintf("%d repos", len(m.repos)))
+	if count > 0 {
+		countStr = dimStyle.Render(fmt.Sprintf("%d pinned", count))
 	}
 	titlePad := w - lipgloss.Width(title) - lipgloss.Width(countStr)
 	if titlePad < 1 {
 		titlePad = 1
 	}
 	b.WriteString(title + strings.Repeat(" ", titlePad) + countStr + "\n")
+
+	// System status bar
+	var statusParts []string
+	if m.sessions > 0 {
+		statusParts = append(statusParts, fmt.Sprintf("%d sessions", m.sessions))
+	}
+	if m.swarmCount > 0 {
+		s := fmt.Sprintf("%d swarm", m.swarmCount)
+		if m.swarmCount > 1 {
+			s += "s"
+		}
+		if m.agentTotal > 0 {
+			s += fmt.Sprintf(" (%d agents)", m.agentActive)
+		}
+		statusParts = append(statusParts, s)
+	}
+	if len(statusParts) > 0 {
+		b.WriteString("  " + dimStyle.Render(strings.Join(statusParts, " · ")) + "\n")
+	}
+
 	b.WriteString(dimStyle.Render("  "+strings.Repeat("─", maxInt(0, w-4))) + "\n")
 
-	// Loading
-	if m.repoLoading && len(m.repos) == 0 {
-		b.WriteString("\n  " + m.spinner.View() + " Loading projects...\n")
+	// Loading (no items yet)
+	if m.loading && len(m.items) == 0 {
+		b.WriteString("\n  " + m.spinner.View() + " Loading atlas...\n")
 		return b.String()
 	}
 
-	// Error
-	if m.repoErr != nil && len(m.repos) == 0 {
-		b.WriteString("\n  " + errStyle.Render("Error: "+m.repoErr.Error()) + "\n")
+	// Error (no items)
+	if m.loadErr != nil && len(m.items) == 0 {
+		b.WriteString("\n  " + errStyle.Render("Error: "+m.loadErr.Error()) + "\n")
 		b.WriteString("\n  " + dimStyle.Render("Press r to retry, q to quit") + "\n")
 		return b.String()
 	}
 
-	// Repo list
-	for i, repo := range m.repos {
-		selected := i == m.repoCursor
+	// Render items
+	for i, item := range m.items {
+		if item.IsHeader {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString("  " + sectionStyle.Render(item.SectionName) + "\n")
+			continue
+		}
+
+		selected := i == m.cursor
 		prefix := "  "
 		if selected {
 			prefix = "▸ "
 		}
 
-		name := repo.Name
-		if len(name) > 20 {
-			name = name[:19] + "…"
-		}
-
-		// PR count
-		prStr := ""
-		if repo.PRCount == 1 {
-			prStr = "1 PR"
-		} else if repo.PRCount > 1 {
-			prStr = fmt.Sprintf("%d PRs", repo.PRCount)
-		}
-
-		// Clone indicator
-		cloneInd := dimStyle.Render("✗")
-		if repo.LocalPath != "" {
-			cloneInd = greenStyle.Render("✓")
-		}
-
-		// Time ago
-		ago := ""
-		if t, err := time.Parse(time.RFC3339, repo.PushedAt); err == nil {
-			ago = timeAgo(t)
-		}
-
-		nameCol := fmt.Sprintf("%-20s", name)
-		prCol := fmt.Sprintf("%-6s", prStr)
-		usedWidth := 2 + 20 + 1 + 6 + 1 + 2 + 1 // prefix+name+gap+pr+gap+clone+gap
-		agoWidth := w - usedWidth - 1
-		if agoWidth < 0 {
-			agoWidth = 0
-		}
-		agoCol := fmt.Sprintf("%*s", agoWidth, ago)
-
-		if selected {
-			b.WriteString(selectedStyle.Render(prefix+nameCol) + " " +
-				orangeStyle.Render(prCol) + " " + cloneInd + " " +
-				dimStyle.Render(agoCol) + "\n")
-		} else {
-			b.WriteString(normalStyle.Render(prefix+nameCol) + " " +
-				orangeStyle.Render(prCol) + " " + cloneInd + " " +
-				dimStyle.Render(agoCol) + "\n")
+		switch item.Entry.Type {
+		case "repo":
+			b.WriteString(m.renderRepoItem(item, prefix, selected, w))
+		case "github":
+			b.WriteString(m.renderGithubItem(item, prefix, selected, w))
+		case "remote":
+			b.WriteString(m.renderRemoteItem(item, prefix, selected))
+		case "dir":
+			b.WriteString(m.renderDirItem(item, prefix, selected))
 		}
 	}
 
 	// Refresh indicator
-	if m.repoLoading && len(m.repos) > 0 {
+	if m.loading && len(m.items) > 0 {
 		b.WriteString("\n  " + m.spinner.View() + " refreshing...")
 	}
-	if m.repoErr != nil && len(m.repos) > 0 {
-		b.WriteString("\n  " + errStyle.Render("refresh failed: "+m.repoErr.Error()))
+	if m.loadErr != nil && len(m.items) > 0 {
+		b.WriteString("\n  " + errStyle.Render("refresh failed: "+m.loadErr.Error()))
 	}
 
 	b.WriteString("\n")
-	b.WriteString(footerStyle.Render("  ↑↓/jk=nav  ⏎=detail  o=web  e=shell  a=agent  r=refresh  q=quit"))
+	b.WriteString(footerStyle.Render("  ↑↓/jk=nav  ⏎=detail  m=map  o=web  e=shell  a=agent  r=refresh  q=quit"))
 	b.WriteString("\n")
 
 	return b.String()
 }
 
+func (m model) renderRepoItem(item DisplayItem, prefix string, selected bool, w int) string {
+	name := item.Entry.Name
+	if len(name) > 20 {
+		name = name[:19] + "…"
+	}
+	nameCol := fmt.Sprintf("%-20s", name)
+
+	branch := item.Entry.Branch
+	if len(branch) > 10 {
+		branch = branch[:9] + "…"
+	}
+	branchCol := fmt.Sprintf("%-10s", branch)
+
+	// Dirty indicator
+	dirty := ""
+	if d, err := strconv.Atoi(item.Entry.Dirty); err == nil && d > 0 {
+		dirty = orangeStyle.Render(fmt.Sprintf("%dΔ", d))
+	}
+
+	// PR count
+	prStr := ""
+	if item.PRCount == 1 {
+		prStr = "1 PR"
+	} else if item.PRCount > 1 {
+		prStr = fmt.Sprintf("%d PRs", item.PRCount)
+	}
+
+	// Last commit
+	ago := item.Entry.LastCommit
+
+	var line string
+	if selected {
+		line = "  " + selectedStyle.Render(prefix+nameCol) + " " + dimStyle.Render(branchCol)
+	} else {
+		line = "  " + normalStyle.Render(prefix+nameCol) + " " + dimStyle.Render(branchCol)
+	}
+	if dirty != "" {
+		line += " " + dirty
+	}
+	if prStr != "" {
+		line += "  " + orangeStyle.Render(prStr)
+	}
+	if ago != "" {
+		line += "  " + dimStyle.Render(ago)
+	}
+	return line + "\n"
+}
+
+func (m model) renderGithubItem(item DisplayItem, prefix string, selected bool, w int) string {
+	name := item.Entry.Name
+	if len(name) > 20 {
+		name = name[:19] + "…"
+	}
+	nameCol := fmt.Sprintf("%-20s", name)
+
+	cloneInd := dimStyle.Render("✗")
+	if item.Entry.LocalPath != "" {
+		cloneInd = greenStyle.Render("✓")
+	}
+
+	prStr := ""
+	if item.PRCount == 1 {
+		prStr = "1 PR"
+	} else if item.PRCount > 1 {
+		prStr = fmt.Sprintf("%d PRs", item.PRCount)
+	}
+
+	var line string
+	if selected {
+		line = "  " + selectedStyle.Render(prefix+nameCol) + " " + cloneInd
+	} else {
+		line = "  " + normalStyle.Render(prefix+nameCol) + " " + cloneInd
+	}
+	if prStr != "" {
+		line += "  " + orangeStyle.Render(prStr)
+	}
+	line += "  " + dimStyle.Render(item.Entry.Visibility)
+	if item.Entry.UpdatedAt != "" {
+		line += "  " + dimStyle.Render(item.Entry.UpdatedAt)
+	}
+	return line + "\n"
+}
+
+func (m model) renderRemoteItem(item DisplayItem, prefix string, selected bool) string {
+	name := item.Entry.Name
+	if len(name) > 18 {
+		name = name[:17] + "…"
+	}
+	nameCol := fmt.Sprintf("%-18s", name)
+	desc := item.Entry.Description
+
+	// Connectivity dot
+	dot := dimStyle.Render("○") // unknown
+	if reachable, probed := m.deviceStatus[item.Entry.Name]; probed {
+		if reachable {
+			dot = greenStyle.Render("●")
+		} else {
+			dot = errStyle.Render("●")
+		}
+	}
+
+	if selected {
+		return "  " + selectedStyle.Render(prefix) + dot + " " + selectedStyle.Render(nameCol) + " " + dimStyle.Render(desc) + "\n"
+	}
+	return "  " + cyanStyle.Render(prefix) + dot + " " + cyanStyle.Render(nameCol) + " " + dimStyle.Render(desc) + "\n"
+}
+
+func (m model) renderDirItem(item DisplayItem, prefix string, selected bool) string {
+	name := item.Entry.Name
+	if len(name) > 20 {
+		name = name[:19] + "…"
+	}
+	nameCol := fmt.Sprintf("%-20s", name)
+	if selected {
+		return "  " + selectedStyle.Render(prefix+nameCol) + "  " + dimStyle.Render("—") + "\n"
+	}
+	return "  " + dimStyle.Render(prefix+nameCol) + "  " + dimStyle.Render("—") + "\n"
+}
+
 // ---------------------------------------------------------------------------
-// View — Level 1
+// View — Level 1 (repo detail)
 // ---------------------------------------------------------------------------
 
 func (m model) viewRepoDetail() string {
@@ -938,15 +1418,15 @@ func (m model) viewRepoDetail() string {
 		w = 60
 	}
 
-	if m.activeRepo == nil {
-		return "  (no repo selected)\n"
+	if m.activeItem == nil {
+		return "  (no item selected)\n"
 	}
 
 	// Breadcrumb
-	crumb := breadStyle.Render("  Projects") + dimStyle.Render(" > ") + titleStyle.Render(m.activeRepo.Name)
+	crumb := breadStyle.Render("  Atlas") + dimStyle.Render(" > ") + titleStyle.Render(m.activeItem.Entry.Name)
 	cloneInfo := ""
-	if m.activeRepo.LocalPath != "" {
-		short := m.activeRepo.LocalPath
+	if localPath := m.itemLocalPath(); localPath != "" {
+		short := localPath
 		home, _ := os.UserHomeDir()
 		if strings.HasPrefix(short, home) {
 			short = "~" + short[len(home):]
@@ -988,7 +1468,9 @@ func (m model) viewRepoDetail() string {
 		b.WriteString("  " + dimStyle.Render(prHeader) + "\n")
 	}
 
-	if len(m.prs) == 0 {
+	if !m.itemIsGithub() {
+		b.WriteString("  " + dimStyle.Render("  local only — no PRs") + "\n")
+	} else if len(m.prs) == 0 {
 		b.WriteString("  " + dimStyle.Render("  no open PRs") + "\n")
 	}
 	for i, pr := range m.prs {
@@ -1000,7 +1482,7 @@ func (m model) viewRepoDetail() string {
 
 		num := fmt.Sprintf("#%-4d", pr.Number)
 		title := pr.Title
-		maxTitle := w - 30 // leave room for metadata
+		maxTitle := w - 30
 		if maxTitle < 10 {
 			maxTitle = 10
 		}
@@ -1022,7 +1504,6 @@ func (m model) viewRepoDetail() string {
 		case "REVIEW_REQUIRED":
 			review = orangeStyle.Render("PENDING")
 		}
-
 		if pr.IsDraft {
 			review = dimStyle.Render("DRAFT")
 		}
@@ -1065,12 +1546,10 @@ func (m model) viewRepoDetail() string {
 		if selected {
 			prefix = "  ▸ "
 		}
-
 		name := branch.Name
 		if len(name) > 30 {
 			name = name[:29] + "…"
 		}
-
 		if selected {
 			b.WriteString(prefix + selectedStyle.Render(name) + "\n")
 		} else {
@@ -1081,7 +1560,7 @@ func (m model) viewRepoDetail() string {
 	// Actions footer
 	b.WriteString("\n")
 	actions := "  [e] shell"
-	if m.activeRepo.LocalPath != "" {
+	if m.itemLocalPath() != "" {
 		actions += "   [a] agent   [s] scan"
 	} else {
 		actions += "   [a] clone+agent"
@@ -1094,7 +1573,7 @@ func (m model) viewRepoDetail() string {
 }
 
 // ---------------------------------------------------------------------------
-// View — Level 2
+// View — Level 2 (PR detail)
 // ---------------------------------------------------------------------------
 
 func (m model) viewPRDetail() string {
@@ -1104,13 +1583,13 @@ func (m model) viewPRDetail() string {
 		w = 60
 	}
 
-	if m.activeRepo == nil || m.activePR == nil {
+	if m.activeItem == nil || m.activePR == nil {
 		return "  (no PR selected)\n"
 	}
 
 	// Breadcrumb
-	crumb := breadStyle.Render("  Projects") + dimStyle.Render(" > ") +
-		breadStyle.Render(m.activeRepo.Name) + dimStyle.Render(" > ") +
+	crumb := breadStyle.Render("  Atlas") + dimStyle.Render(" > ") +
+		breadStyle.Render(m.activeItem.Entry.Name) + dimStyle.Render(" > ") +
 		titleStyle.Render(fmt.Sprintf("PR #%d", m.activePR.Number))
 	b.WriteString(crumb + "\n")
 	b.WriteString(dimStyle.Render("  "+strings.Repeat("─", maxInt(0, w-4))) + "\n")
@@ -1229,12 +1708,10 @@ func (m model) viewPRDetail() string {
 	if d.Body != "" {
 		b.WriteString("\n")
 		b.WriteString("  " + dimStyle.Render("Description:") + "\n")
-		body := d.Body
-		// Show first ~8 lines
-		lines := strings.Split(body, "\n")
+		lines := strings.Split(d.Body, "\n")
 		maxLines := 8
 		if m.height > 0 {
-			maxLines = maxInt(4, (m.height-18))
+			maxLines = maxInt(4, m.height-18)
 		}
 		if len(lines) > maxLines {
 			lines = lines[:maxLines]
@@ -1253,11 +1730,50 @@ func (m model) viewPRDetail() string {
 	// Actions
 	b.WriteString("\n")
 	actions := "  [e] checkout"
-	if m.activeRepo.LocalPath != "" {
+	if m.itemLocalPath() != "" {
 		actions += "   [a] agent on branch"
 	}
 	actions += "   [o] browser   Esc=back"
 	b.WriteString(footerStyle.Render(actions) + "\n")
+
+	return b.String()
+}
+
+// ---------------------------------------------------------------------------
+// View — Remote detail
+// ---------------------------------------------------------------------------
+
+func (m model) viewRemoteDetail() string {
+	var b strings.Builder
+	w := m.width
+	if w <= 0 {
+		w = 60
+	}
+
+	if m.activeItem == nil {
+		return "  (no host selected)\n"
+	}
+
+	e := m.activeItem.Entry
+
+	// Breadcrumb
+	crumb := breadStyle.Render("  Atlas") + dimStyle.Render(" > ") + titleStyle.Render(e.Name)
+	b.WriteString(crumb + "\n")
+	b.WriteString(dimStyle.Render("  "+strings.Repeat("─", maxInt(0, w-4))) + "\n")
+
+	b.WriteString("\n")
+	b.WriteString("  " + dimStyle.Render("Host:  ") + normalStyle.Render(e.Host) + "\n")
+	b.WriteString("  " + dimStyle.Render("User:  ") + normalStyle.Render(e.User) + "\n")
+	if e.OS != "" {
+		b.WriteString("  " + dimStyle.Render("OS:    ") + normalStyle.Render(e.OS) + "\n")
+	}
+	if e.Description != "" {
+		b.WriteString("\n")
+		b.WriteString("  " + normalStyle.Render(e.Description) + "\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(footerStyle.Render("  [e] SSH connect   [a] remote agent   Esc=back   q=quit") + "\n")
 
 	return b.String()
 }

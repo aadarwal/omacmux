@@ -1,0 +1,30 @@
+# ==============================================================================
+# Tiling WM — CLI control
+# ==============================================================================
+# Interactive wrapper for tile.sh. Use from the command line to control
+# the tiling layout of the current tmux window.
+#
+#   tile              — show current layout
+#   tile cycle        — cycle to next layout
+#   tile tiled        — set specific layout (tiled/main-v/main-h/cols/rows)
+#   tile off          — disable auto-tiling for this window
+
+tile() {
+  [[ -z $TMUX ]] && { echo "tile requires tmux."; return 1; }
+
+  case "${1:-status}" in
+    cycle|retile|close|status)
+      bash ~/.config/tmux/tile.sh "$1"
+      ;;
+    tiled|main-v|main-h|cols|rows)
+      bash ~/.config/tmux/tile.sh set "$1"
+      ;;
+    off)
+      tmux set-option -wu @tile_layout 2>/dev/null
+      tmux display-message "tile: off"
+      ;;
+    *)
+      echo "Usage: tile [tiled|main-v|main-h|cols|rows|cycle|off|status]"
+      ;;
+  esac
+}

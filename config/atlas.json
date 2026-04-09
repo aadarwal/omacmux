@@ -9,6 +9,16 @@
     "~/omarchy",
     "~/openclaude"
   ],
+  "pinned": [
+    {
+      "type": "remote",
+      "name": "michelangelo"
+    },
+    {
+      "type": "remote",
+      "name": "midway2"
+    }
+  ],
   "desktop_path": "~/Desktop",
   "drives": [
     {

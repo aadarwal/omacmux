@@ -332,6 +332,191 @@ _atlas_entries_all() {
 }
 
 # ------------------------------------------------------------------------------
+# JSON export — structured data for desktop widget and programmatic consumers
+# ------------------------------------------------------------------------------
+
+_atlas_json_entry() {
+  local type="$1" name="$2"
+  shift 2
+  printf '{"type":"%s","name":"%s"' "$type" "$name"
+  while (( $# >= 2 )); do
+    local val="$2"
+    # Escape quotes in values
+    val="${val//\"/\\\"}"
+    printf ',"%s":"%s"' "$1" "$val"
+    shift 2
+  done
+  printf '}'
+}
+
+_atlas_json_active() {
+  [[ -f "$ATLAS_CONFIG" ]] || return
+  local first=1
+  printf '{"section":"active","label":"ACTIVE PROJECTS","entries":['
+  while IFS= read -r p; do
+    local dir=$(_atlas_expand "$p")
+    local name=$(basename "$dir")
+    [[ -d "$dir" ]] || continue
+    (( first )) || printf ','
+    first=0
+
+    local info
+    if info=$(_atlas_git_info "$dir"); then
+      IFS='|' read -r branch last dirty <<< "$info"
+      [[ "$dirty" == "+" ]] && dirty=1
+      local gh="false"
+      _atlas_has_github "$dir" && gh="true"
+      _atlas_json_entry repo "$name" \
+        path "$dir" branch "$branch" last_commit "$last" \
+        dirty "$dirty" has_github "$gh"
+    else
+      _atlas_json_entry dir "$name" path "$dir"
+    fi
+  done < <(jq -r '.active_projects[]' "$ATLAS_CONFIG" 2>/dev/null)
+  printf ']}'
+}
+
+_atlas_json_desktop() {
+  local desktop
+  desktop=$(_atlas_expand "$(jq -r '.desktop_path // "~/Desktop"' "$ATLAS_CONFIG" 2>/dev/null)")
+  [[ -d "$desktop" ]] || return
+
+  local first=1
+  printf '{"section":"desktop","label":"DESKTOP","entries":['
+  # Git repos
+  for d in "$desktop"/*/; do
+    [[ -d "$d/.git" ]] || continue
+    local name=$(basename "$d")
+    (( first )) || printf ','
+    first=0
+    local info
+    if info=$(_atlas_git_info "$d" fast); then
+      IFS='|' read -r branch last dirty <<< "$info"
+      [[ "$dirty" == "+" ]] && dirty=1
+      local gh="false"
+      _atlas_has_github "$d" && gh="true"
+      _atlas_json_entry repo "$name" \
+        path "${d%/}" branch "$branch" last_commit "$last" \
+        dirty "$dirty" has_github "$gh"
+    fi
+  done
+  # Non-repo dirs
+  for d in "$desktop"/*/; do
+    [[ -d "$d/.git" ]] && continue
+    [[ -d "$d" ]] || continue
+    (( first )) || printf ','
+    first=0
+    _atlas_json_entry dir "$(basename "$d")" path "${d%/}"
+  done
+  printf ']}'
+}
+
+_atlas_json_drives() {
+  [[ -f "$ATLAS_CONFIG" ]] || return
+  local has_drives
+  has_drives=$(jq -r '.drives | length' "$ATLAS_CONFIG" 2>/dev/null)
+  (( has_drives > 0 )) || return
+
+  jq -r '.drives[] | "\(.name)\t\(.path)"' "$ATLAS_CONFIG" 2>/dev/null | \
+  while IFS=$'\t' read -r name path; do
+    local expanded=$(_atlas_expand "$path")
+    local mounted="true"
+    [[ -d "$expanded" ]] || mounted="false"
+    printf '{"section":"drive","label":"%s","mounted":%s,"entries":[' "${name}" "$mounted"
+    if [[ "$mounted" == "true" ]]; then
+      local first=1
+      for item in "$expanded"/*/; do
+        [[ -d "$item" ]] || continue
+        (( first )) || printf ','
+        first=0
+        _atlas_json_entry dir "$(basename "$item")" path "${item%/}"
+      done
+    fi
+    printf ']}'
+  done
+}
+
+_atlas_json_github() {
+  local repos
+  repos=$(_atlas_github_repos 2>/dev/null) || return
+
+  printf '{"section":"github","label":"GITHUB","entries":['
+  local first=1
+  echo "$repos" | jq -r '.[] | "\(.name)\t\(.updatedAt)\t\(.isPrivate)"' 2>/dev/null | \
+  while IFS=$'\t' read -r name updated private; do
+    (( first )) || printf ','
+    first=0
+    local vis="public"
+    [[ "$private" == "true" ]] && vis="private"
+    # Check if cloned locally
+    local local_path=""
+    for loc in "$HOME/$name" "$HOME/Desktop/$name"; do
+      if [[ -d "$loc/.git" ]]; then
+        local_path="$loc"
+        break
+      fi
+    done
+    _atlas_json_entry github "$name" \
+      updated_at "${updated:0:10}" visibility "$vis" local_path "$local_path"
+  done
+  printf ']}'
+}
+
+_atlas_json_icloud() {
+  local icloud="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
+  [[ -d "$icloud" ]] || return
+
+  printf '{"section":"icloud","label":"ICLOUD","entries":['
+  local first=1
+  for d in "$icloud"/*/; do
+    [[ -d "$d" ]] || continue
+    (( first )) || printf ','
+    first=0
+    _atlas_json_entry dir "$(basename "$d")" path "${d%/}"
+  done
+  printf ']}'
+}
+
+_atlas_json_remote() {
+  [[ -f "$ATLAS_HOSTS" ]] || return
+  local count
+  count=$(jq 'length' "$ATLAS_HOSTS" 2>/dev/null)
+  (( count > 0 )) || return
+
+  printf '{"section":"remote","label":"REMOTE","entries":['
+  local first=1
+  jq -r '.[] | "\(.name)\t\(.host)\t\(.user)\t\(.os // "")\t\(.description // "")"' "$ATLAS_HOSTS" 2>/dev/null | \
+  while IFS=$'\t' read -r name host user os desc; do
+    (( first )) || printf ','
+    first=0
+    _atlas_json_entry remote "$name" \
+      host "$host" user "$user" os "$os" description "$desc"
+  done
+  printf ']}'
+}
+
+_atlas_json() {
+  # Include raw pinned list for consumers
+  local pinned_json
+  pinned_json=$(jq -c '.pinned // []' "$ATLAS_CONFIG" 2>/dev/null)
+  [[ -n "$pinned_json" ]] || pinned_json="[]"
+
+  printf '{"generated_at":"%s","pinned":%s,"sections":[' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pinned_json"
+  local first=1
+  for gen in _atlas_json_active _atlas_json_desktop _atlas_json_drives \
+             _atlas_json_github _atlas_json_icloud _atlas_json_remote; do
+    local out
+    out=$($gen 2>/dev/null)
+    [[ -n "$out" ]] || continue
+    (( first )) || printf ','
+    first=0
+    printf '%s' "$out"
+  done
+  printf ']}'
+}
+
+# ------------------------------------------------------------------------------
 # Non-interactive print
 # ------------------------------------------------------------------------------
 
@@ -369,10 +554,11 @@ _atlas_browse() {
     | fzf --ansi --tmux 85%,80% \
       --delimiter '\t' \
       --with-nth 3 \
-      --header "enter: open  ctrl-o: finder  esc: close" \
+      --header "enter: open  p: pin  ctrl-o: finder  esc: close" \
       --preview '_atlas_preview {1} {2}' \
       --preview-window "right:50%" \
       --bind "ctrl-o:execute-silent(open -R {2})" \
+      --bind "p:execute-silent(export OMACMUX_PATH=${OMACMUX_PATH:-$HOME/omacmux} && source \$OMACMUX_PATH/config/bash/fns/atlas && _atlas_pin {1} {2})+reload(export OMACMUX_PATH=${OMACMUX_PATH:-$HOME/omacmux} && source \$OMACMUX_PATH/config/bash/fns/atlas && _atlas_entries_all)" \
   ) || return 0
 
   # Parse selection
@@ -419,15 +605,93 @@ _atlas_browse() {
 # Entry point
 # ------------------------------------------------------------------------------
 
+# ------------------------------------------------------------------------------
+# Pinning — add/remove items from persistent desktop view
+# ------------------------------------------------------------------------------
+
+# Check if an entry is pinned (type + name)
+_atlas_is_pinned() {
+  local type="$1" name="$2"
+  # Active projects are implicitly pinned
+  if [[ "$type" == "repo" ]]; then
+    jq -e --arg n "$name" '.active_projects[] | select(endswith("/" + $n))' \
+      "$ATLAS_CONFIG" &>/dev/null && return 0
+  fi
+  jq -e --arg t "$type" --arg n "$name" \
+    '.pinned[]? | select(.type == $t and .name == $n)' \
+    "$ATLAS_CONFIG" &>/dev/null
+}
+
+# Pin an entry
+_atlas_pin() {
+  local type="$1" name="$2"
+  if _atlas_is_pinned "$type" "$name"; then
+    echo "Already pinned: $type/$name"
+    return 0
+  fi
+  local tmp=$(mktemp)
+  jq --arg t "$type" --arg n "$name" \
+    '.pinned = ((.pinned // []) + [{"type": $t, "name": $n}])' \
+    "$ATLAS_CONFIG" > "$tmp" && mv "$tmp" "$ATLAS_CONFIG"
+  echo "Pinned: $type/$name"
+}
+
+# Unpin an entry
+_atlas_unpin() {
+  local type="$1" name="$2"
+  if ! _atlas_is_pinned "$type" "$name"; then
+    echo "Not pinned: $type/$name"
+    return 0
+  fi
+  # Can't unpin active_projects from here
+  if [[ "$type" == "repo" ]]; then
+    if jq -e --arg n "$name" '.active_projects[] | select(endswith("/" + $n))' \
+      "$ATLAS_CONFIG" &>/dev/null; then
+      echo "Cannot unpin active project (remove from active_projects in config)"
+      return 1
+    fi
+  fi
+  local tmp=$(mktemp)
+  jq --arg t "$type" --arg n "$name" \
+    '.pinned = [.pinned[]? | select(.type != $t or .name != $n)]' \
+    "$ATLAS_CONFIG" > "$tmp" && mv "$tmp" "$ATLAS_CONFIG"
+  echo "Unpinned: $type/$name"
+}
+
 map() {
   case "${1:-}" in
     --print|-p) _atlas_print ;;
+    --json|-j)
+      mkdir -p "$ATLAS_CACHE_DIR"
+      local out
+      out=$(_atlas_json)
+      printf '%s\n' "$out"
+      printf '%s' "$out" > "$ATLAS_CACHE_DIR/state.json"
+      ;;
+    pin)
+      if [[ -z "${2:-}" || -z "${3:-}" ]]; then
+        echo "Usage: map pin <type> <name>"
+        echo "Types: github, remote, repo, dir"
+        return 1
+      fi
+      _atlas_pin "$2" "$3"
+      ;;
+    unpin)
+      if [[ -z "${2:-}" || -z "${3:-}" ]]; then
+        echo "Usage: map unpin <type> <name>"
+        return 1
+      fi
+      _atlas_unpin "$2" "$3"
+      ;;
     config)     ${EDITOR:-nvim} "$ATLAS_CONFIG" ;;
     --help|-h)
-      echo "Usage: map [section|name|--print|config]"
+      echo "Usage: map [section|name|--print|--json|pin|unpin|config]"
       echo ""
       echo "Sections: active, desktop, drive, github, icloud, remote"
       echo "Options:  --print  non-interactive overview"
+      echo "          --json   structured JSON (also writes state.json)"
+      echo "          pin      map pin <type> <name>"
+      echo "          unpin    map unpin <type> <name>"
       echo "          config   edit classification config"
       ;;
     *) _atlas_browse "$1" ;;

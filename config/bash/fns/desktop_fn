@@ -7,7 +7,7 @@ _desktop_build() {
   local widgets_dir="$HOME/omacmux/desktop/widgets"
   local built=0
 
-  for widget in projects news status ports; do
+  for widget in projects news ports atlas-map; do
     local dir="$widgets_dir/$widget"
     [[ -f "$dir/main.go" ]] || continue
     echo "Building $widget..."
@@ -31,7 +31,7 @@ desktop() {
   local accounts_dir="$HOME/desktop/artha"
 
   # Build widgets if binaries don't exist
-  for widget in projects news status ports; do
+  for widget in projects news ports atlas-map; do
     if [[ ! -x "$widgets_dir/$widget/$widget" ]]; then
       echo "Building desktop widgets..."
       _desktop_build || return 1
@@ -46,32 +46,32 @@ desktop() {
   fi
 
   # Create the desktop window
-  local projects_pane="$TMUX_PANE"
+  local atlas_pane="$TMUX_PANE"
   tmux rename-window "desktop"
 
   # ┌─────────────┬─────────────┐
-  # │  PROJECTS   │  STATUS     │
+  # │  ATLAS      │  (free)     │
   # ├────────┬────┴────┬────────┤
   # │ PORTS  │PORTFOLIO│  NEWS  │
   # ├────────┬─────────┴────────┤
-  # │ BTOP   │    (reserved)    │
+  # │ BTOP   │  ATLAS MAP      │
   # └────────┴──────────────────┘
 
   # 1. Bottom strip (43% height — btop needs ≥24 rows)
   local btop_pane
-  btop_pane=$(tmux split-window -v -p 43 -t "$projects_pane" -P -F '#{pane_id}')
+  btop_pane=$(tmux split-window -v -p 43 -t "$atlas_pane" -P -F '#{pane_id}')
 
-  # Split bottom: btop left (~34% ≈ 80 cols) | reserved right
-  local reserved_pane
-  reserved_pane=$(tmux split-window -h -p 66 -t "$btop_pane" -P -F '#{pane_id}')
+  # Split bottom: btop left (~34% ≈ 80 cols) | atlas-map right
+  local map_pane
+  map_pane=$(tmux split-window -h -p 66 -t "$btop_pane" -P -F '#{pane_id}')
 
   # 2. Split remaining top area into top row and middle row (50/50)
   local ports_pane
-  ports_pane=$(tmux split-window -v -p 50 -t "$projects_pane" -P -F '#{pane_id}')
+  ports_pane=$(tmux split-window -v -p 50 -t "$atlas_pane" -P -F '#{pane_id}')
 
-  # 3. Top row: PROJECTS (left 50%) | STATUS (right 50%)
-  local status_pane
-  status_pane=$(tmux split-window -h -p 50 -t "$projects_pane" -P -F '#{pane_id}')
+  # 3. Top row: ATLAS (left 50%) | FREE (right 50%)
+  local free_pane
+  free_pane=$(tmux split-window -h -p 50 -t "$atlas_pane" -P -F '#{pane_id}')
 
   # 4. Middle row: PORTS (left 33%) | rest (right 67%)
   local portfolio_pane
@@ -82,11 +82,11 @@ desktop() {
   news_pane=$(tmux split-window -h -p 50 -t "$portfolio_pane" -P -F '#{pane_id}')
 
   # Launch widgets in each pane
-  tmux send-keys -t "$projects_pane" "$widgets_dir/projects/projects" C-m
-  tmux send-keys -t "$status_pane" "$widgets_dir/status/status" C-m
+  tmux send-keys -t "$atlas_pane" "$widgets_dir/projects/projects" C-m
   tmux send-keys -t "$ports_pane" "$widgets_dir/ports/ports" C-m
   tmux send-keys -t "$news_pane" "$widgets_dir/news/news" C-m
   tmux send-keys -t "$btop_pane" "btop" C-m
+  tmux send-keys -t "$map_pane" "$widgets_dir/atlas-map/atlas-map" C-m
 
   # Portfolio — use compiled binary or go run
   if [[ -x "$accounts_dir/artha" ]]; then
@@ -97,5 +97,5 @@ desktop() {
     tmux send-keys -t "$portfolio_pane" "echo 'Portfolio widget not found at $accounts_dir'" C-m
   fi
 
-  tmux select-pane -t "$projects_pane"
+  tmux select-pane -t "$atlas_pane"
 }

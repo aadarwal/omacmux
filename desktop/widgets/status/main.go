@@ -41,7 +41,6 @@ var (
 )
 
 // Silence unused-variable warnings for colours reserved for future use.
-var _ = red
 var _ = subtitleStyle
 var _ = orangeStyle
 var _ = cyanStyle
@@ -73,6 +72,26 @@ type Device struct {
 	Port        int    `json:"port"`
 	OS          string `json:"os"`
 	Description string `json:"description"`
+	Source      string `json:"-"` // "static" or "tailscale"
+	Online      *bool  `json:"-"` // nil = unknown, set for tailscale peers
+}
+
+// ---------------------------------------------------------------------------
+// Data types — Tailscale status JSON
+// ---------------------------------------------------------------------------
+
+type tsStatus struct {
+	Self tsNode            `json:"Self"`
+	Peer map[string]tsNode `json:"Peer"`
+}
+
+type tsNode struct {
+	HostName     string   `json:"HostName"`
+	DNSName      string   `json:"DNSName"`
+	OS           string   `json:"OS"`
+	Online       bool     `json:"Online"`
+	TailscaleIPs []string `json:"TailscaleIPs"`
+	Active       bool     `json:"Active"`
 }
 
 // ---------------------------------------------------------------------------
@@ -165,11 +184,49 @@ func fetchCmd() tea.Cmd {
 			}
 		}
 
-		// 3. Devices
+		// 3. Static devices from hosts.json
 		hostsPath := "/Users/aadarwal/omacmux/mesh/hosts.json"
 		data, err := os.ReadFile(hostsPath)
 		if err == nil {
 			_ = json.Unmarshal(data, &msg.devices)
+		}
+		for i := range msg.devices {
+			msg.devices[i].Source = "static"
+		}
+
+		// 4. Tailscale peers — merge dynamically
+		tsOut, err := exec.Command("tailscale", "status", "--json").Output()
+		if err == nil {
+			var ts tsStatus
+			if json.Unmarshal(tsOut, &ts) == nil {
+				// Build a set of static hostnames for dedup
+				staticNames := make(map[string]bool)
+				for _, d := range msg.devices {
+					staticNames[strings.ToLower(d.Name)] = true
+				}
+
+				for _, peer := range ts.Peer {
+					name := peer.HostName
+					if staticNames[strings.ToLower(name)] {
+						continue // already in hosts.json
+					}
+					ip := ""
+					if len(peer.TailscaleIPs) > 0 {
+						ip = peer.TailscaleIPs[0]
+					}
+					online := peer.Online
+					msg.devices = append(msg.devices, Device{
+						Name:        name,
+						Host:        ip,
+						User:        os.Getenv("USER"),
+						Port:        22,
+						OS:          peer.OS,
+						Description: peer.OS,
+						Source:      "tailscale",
+						Online:      &online,
+					})
+				}
+			}
 		}
 
 		return msg
@@ -246,12 +303,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.devices = msg.devices
 		m.err = msg.err
 		m.loading = false
-		// Reset status map and fire connectivity checks in parallel.
+		// Reset status map; use Tailscale online field directly, nc-probe static hosts.
 		m.deviceStatus = make(map[string]bool)
 		var cmds []tea.Cmd
 		cmds = append(cmds, scheduleTick())
 		for _, d := range m.devices {
-			cmds = append(cmds, checkConnectivity(d))
+			if d.Source == "tailscale" && d.Online != nil {
+				m.deviceStatus[d.Name] = *d.Online
+			} else {
+				cmds = append(cmds, checkConnectivity(d))
+			}
 		}
 		return m, tea.Batch(cmds...)
 
@@ -306,30 +367,31 @@ func (m model) View() string {
 				cursor = "▸ "
 			}
 
+			// Status dot: green=online, red=offline (known), dim=unknown
 			dot := dimStyle.Render("○")
-			if m.deviceStatus[d.Name] {
-				dot = greenStyle.Render("●")
+			if reachable, checked := m.deviceStatus[d.Name]; checked {
+				if reachable {
+					dot = greenStyle.Render("●")
+				} else {
+					dot = lipgloss.NewStyle().Foreground(red).Render("●")
+				}
 			}
 
-			name := normalStyle.Render(d.Name)
 			desc := dimStyle.Render(d.Description)
 			if i == m.cursor {
-				name = selectedStyle.Render(d.Name)
 				desc = normalStyle.Render(d.Description)
 			}
 
-			// Pad name to 16 chars for alignment.
+			// Pad name to 20 chars for alignment.
 			padded := d.Name
-			if len(padded) < 16 {
-				padded += strings.Repeat(" ", 16-len(padded))
+			pad := 20 - len(d.Name)
+			if pad < 1 {
+				pad = 1
 			}
 			if i == m.cursor {
-				padded = selectedStyle.Render(padded)
+				padded = selectedStyle.Render(d.Name) + strings.Repeat(" ", pad)
 			} else {
-				padded = name
-				if len(d.Name) < 16 {
-					padded = normalStyle.Render(d.Name) + strings.Repeat(" ", 16-len(d.Name))
-				}
+				padded = normalStyle.Render(d.Name) + strings.Repeat(" ", pad)
 			}
 
 			b.WriteString(cursor + dot + " " + padded + desc + "\n")
