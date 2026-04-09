@@ -19,6 +19,12 @@
       "name": "midway2"
     }
   ],
+  "clusters": [
+    { "name": "Research", "match": ["autoresearch", "autoresearch-icl", "InContextLearning", "ANE", "MarkovComputations"] },
+    { "name": "Tools", "match": ["omacmux", "omarchy", "openclaude", "omacmux-universal"] },
+    { "name": "Sites", "match": ["aadarshagarwal.com", "kratuvak.com", "greatideastoday", "thegreatideastoday"] },
+    { "name": "Compute", "type": "remote" }
+  ],
   "desktop_path": "~/Desktop",
   "drives": [
     {
