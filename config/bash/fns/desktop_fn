@@ -30,14 +30,22 @@ desktop() {
   local widgets_dir="$HOME/omacmux/desktop/widgets"
   local accounts_dir="$HOME/desktop/artha"
 
-  # Build widgets if binaries don't exist
+  # Auto-build if binaries missing or source is newer
+  local needs_build=0
   for widget in projects news ports atlas-map; do
-    if [[ ! -x "$widgets_dir/$widget/$widget" ]]; then
-      echo "Building desktop widgets..."
-      _desktop_build || return 1
-      break
+    local dir="$widgets_dir/$widget"
+    local bin="$dir/$widget"
+    if [[ ! -x "$bin" ]]; then
+      needs_build=1; break
+    fi
+    if [[ -f "$dir/main.go" && "$dir/main.go" -nt "$bin" ]]; then
+      needs_build=1; break
     fi
   done
+  if (( needs_build )); then
+    echo "Building desktop widgets..."
+    _desktop_build || return 1
+  fi
 
   # Build artha if needed
   if [[ ! -x "$accounts_dir/artha" && -f "$accounts_dir/main.go" ]]; then

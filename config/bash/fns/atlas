@@ -309,16 +309,33 @@ _atlas_entries_icloud() {
 _atlas_entries_remote() {
   local R=$'\033[0m' B=$'\033[1m' D=$'\033[2m' C=$'\033[36m'
 
-  [[ -f "$ATLAS_HOSTS" ]] || return
-  local count
-  count=$(jq 'length' "$ATLAS_HOSTS" 2>/dev/null)
-  (( count > 0 )) || return
-
   printf "header\tremote\t${B}  REMOTE${R}\n"
-  jq -r '.[] | "\(.name)\t\(.description)"' "$ATLAS_HOSTS" 2>/dev/null | \
-  while IFS=$'\t' read -r name desc; do
-    printf "remote\t%s\t    ${C}%-18s${R} ${D}%s  via SSH${R}\n" "$name" "$name" "$desc"
-  done
+
+  # Build dedup set
+  local -A static_names
+
+  # Static hosts from hosts.json
+  if [[ -f "$ATLAS_HOSTS" ]]; then
+    jq -r '.[] | "\(.name)\t\(.description)"' "$ATLAS_HOSTS" 2>/dev/null | \
+    while IFS=$'\t' read -r name desc; do
+      static_names["${name,,}"]=1
+      printf "remote\t%s\t    ${C}%-18s${R} ${D}%s  via SSH${R}\n" "$name" "$name" "$desc"
+    done
+  fi
+
+  # Tailscale peers
+  if command -v tailscale &>/dev/null; then
+    local ts_json
+    ts_json=$(tailscale status --json 2>/dev/null)
+    if [[ -n "$ts_json" ]]; then
+      echo "$ts_json" | jq -r '.Peer // {} | to_entries[] | "\(.value.HostName)\t\(.value.OS // "")"' 2>/dev/null | \
+      while IFS=$'\t' read -r hostname os; do
+        [[ -n "$hostname" ]] || continue
+        [[ -z "${static_names["${hostname,,}"]:-}" ]] || continue
+        printf "remote\t%s\t    ${C}%-18s${R} ${D}%s${R}\n" "$hostname" "$hostname" "$os"
+      done
+    fi
+  fi
 }
 
 # Combined entries with visual spacing
@@ -478,20 +495,39 @@ _atlas_json_icloud() {
 }
 
 _atlas_json_remote() {
-  [[ -f "$ATLAS_HOSTS" ]] || return
-  local count
-  count=$(jq 'length' "$ATLAS_HOSTS" 2>/dev/null)
-  (( count > 0 )) || return
-
   printf '{"section":"remote","label":"REMOTE","entries":['
   local first=1
-  jq -r '.[] | "\(.name)\t\(.host)\t\(.user)\t\(.os // "")\t\(.description // "")"' "$ATLAS_HOSTS" 2>/dev/null | \
-  while IFS=$'\t' read -r name host user os desc; do
-    (( first )) || printf ','
-    first=0
-    _atlas_json_entry remote "$name" \
-      host "$host" user "$user" os "$os" description "$desc"
-  done
+
+  # Build set of static host names for dedup
+  local -A static_names
+  if [[ -f "$ATLAS_HOSTS" ]]; then
+    while IFS=$'\t' read -r name host user os desc; do
+      static_names["${name,,}"]=1
+      (( first )) || printf ','
+      first=0
+      _atlas_json_entry remote "$name" \
+        host "$host" user "$user" os "$os" description "$desc"
+    done < <(jq -r '.[] | "\(.name)\t\(.host)\t\(.user)\t\(.os // "")\t\(.description // "")"' "$ATLAS_HOSTS" 2>/dev/null)
+  fi
+
+  # Merge Tailscale peers (skip those already in hosts.json)
+  if command -v tailscale &>/dev/null; then
+    local ts_json
+    ts_json=$(tailscale status --json 2>/dev/null)
+    if [[ -n "$ts_json" ]]; then
+      echo "$ts_json" | jq -r '.Peer // {} | to_entries[] | "\(.value.HostName)\t\(.value.TailscaleIPs[0] // "")\t\(.value.OS // "")\t\(.value.Online)"' 2>/dev/null | \
+      while IFS=$'\t' read -r hostname ip os online; do
+        [[ -n "$hostname" ]] || continue
+        # Skip if already in static hosts
+        [[ -z "${static_names["${hostname,,}"]:-}" ]] || continue
+        (( first )) || printf ','
+        first=0
+        _atlas_json_entry remote "$hostname" \
+          host "$ip" user "${USER:-}" os "$os" description "$os" source "tailscale" online "$online"
+      done
+    fi
+  fi
+
   printf ']}'
 }
 
