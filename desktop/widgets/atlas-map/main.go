@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,16 @@ var (
 	errStyle      = lipgloss.NewStyle().Foreground(red)
 	sectionStyle  = lipgloss.NewStyle().Foreground(orange).Bold(true)
 	purpleStyle   = lipgloss.NewStyle().Foreground(purple)
+
+	cardDim = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#3f3f46")).
+		Padding(0, 1)
+
+	cardSelected = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#e68e0d")).
+			Padding(0, 1)
 )
 
 // ---------------------------------------------------------------------------
@@ -82,9 +93,34 @@ type AtlasEntry struct {
 type DisplayItem struct {
 	IsHeader    bool
 	SectionName string
-	EntryCount  int // for headers: count of entries in section
+	EntryCount  int
 	Entry       AtlasEntry
 	IsPinned    bool
+}
+
+// ---------------------------------------------------------------------------
+// View modes
+// ---------------------------------------------------------------------------
+
+type ViewMode int
+
+const (
+	ModeDashboard ViewMode = iota
+	ModeList
+)
+
+// Card definitions: which atlas sections map to which cards
+var cardDefs = []struct {
+	id    string
+	label string
+	match string // section name to match
+}{
+	{"active", "ACTIVE PROJECTS", "active"},
+	{"remote", "REMOTE", "remote"},
+	{"github", "GITHUB", "github"},
+	{"desktop", "DESKTOP", "desktop"},
+	{"icloud", "ICLOUD", "icloud"},
+	{"drives", "DRIVES", "drive"},
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +129,7 @@ type DisplayItem struct {
 
 type tickMsg time.Time
 type atlasMsg struct {
-	items []DisplayItem
+	state *AtlasState
 	err   error
 }
 type connectMsg struct {
@@ -106,15 +142,23 @@ type connectMsg struct {
 // ---------------------------------------------------------------------------
 
 type model struct {
-	items        []DisplayItem
-	cursor       int
-	scroll       int // first visible line
+	state        *AtlasState
 	spinner      spinner.Model
 	loading      bool
 	loadErr      error
 	deviceStatus map[string]bool
 	width        int
 	height       int
+
+	// Dashboard mode
+	viewMode   ViewMode
+	cardCursor int // 0-5
+
+	// List mode
+	listItems  []DisplayItem
+	listCursor int
+	listScroll int
+	listTitle  string
 }
 
 func initialModel() model {
@@ -130,6 +174,113 @@ func initialModel() model {
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(m.spinner.Tick, loadCmd(), scheduleTick())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+func (m model) sectionEntries(sectionID string) []AtlasEntry {
+	if m.state == nil {
+		return nil
+	}
+	var entries []AtlasEntry
+	for _, s := range m.state.Sections {
+		if s.Section == sectionID {
+			entries = append(entries, s.Entries...)
+		}
+	}
+	return entries
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 1 {
+		return s[:n]
+	}
+	return s[:n-1] + "…"
+}
+
+func shortAgo(s string) string {
+	s = strings.TrimSuffix(s, " ago")
+	f := strings.Fields(s)
+	if len(f) < 2 {
+		return s
+	}
+	n := f[0]
+	switch {
+	case strings.HasPrefix(f[1], "second"):
+		return n + "s"
+	case strings.HasPrefix(f[1], "minute"):
+		return n + "m"
+	case strings.HasPrefix(f[1], "hour"):
+		return n + "h"
+	case strings.HasPrefix(f[1], "day"):
+		return n + "d"
+	case strings.HasPrefix(f[1], "week"):
+		return n + "w"
+	case strings.HasPrefix(f[1], "month"):
+		return n + "mo"
+	case strings.HasPrefix(f[1], "year"):
+		return n + "y"
+	}
+	return s
+}
+
+func recencyLevel(s string) float64 {
+	f := strings.Fields(strings.TrimSuffix(s, " ago"))
+	if len(f) < 2 {
+		return 0.05
+	}
+	switch {
+	case strings.HasPrefix(f[1], "second"), strings.HasPrefix(f[1], "minute"):
+		return 1.0
+	case strings.HasPrefix(f[1], "hour"):
+		return 0.85
+	case strings.HasPrefix(f[1], "day"):
+		return 0.6
+	case strings.HasPrefix(f[1], "week"):
+		return 0.35
+	case strings.HasPrefix(f[1], "month"):
+		return 0.15
+	}
+	return 0.05
+}
+
+func renderBar(filled, total, width int) string {
+	if total == 0 || width <= 0 {
+		return ""
+	}
+	ratio := float64(filled) / float64(total)
+	fw := int(ratio * float64(width))
+	if fw < 0 {
+		fw = 0
+	}
+	if fw > width {
+		fw = width
+	}
+	return greenStyle.Render(strings.Repeat("█", fw)) + dimStyle.Render(strings.Repeat("░", width-fw))
+}
+
+func activityBar(lastCommit string, width int) string {
+	level := recencyLevel(lastCommit)
+	fw := int(level * float64(width))
+	if fw < 1 && level > 0 {
+		fw = 1
+	}
+	if fw > width {
+		fw = width
+	}
+	return cyanStyle.Render(strings.Repeat("█", fw)) + dimStyle.Render(strings.Repeat("░", width-fw))
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +305,6 @@ func loadCmd() tea.Cmd {
 		statePath := getStatePath()
 		data, err := os.ReadFile(statePath)
 		if err != nil || len(data) == 0 {
-			// Generate fresh
 			omx := getOmacmuxPath()
 			atlasFile := filepath.Join(omx, "config", "bash", "fns", "atlas")
 			data, err = exec.Command("bash", "-c",
@@ -163,7 +313,6 @@ func loadCmd() tea.Cmd {
 				return atlasMsg{err: fmt.Errorf("atlas: %w", err)}
 			}
 		} else {
-			// Refresh in background if stale
 			if info, serr := os.Stat(statePath); serr == nil {
 				if time.Since(info.ModTime()) > 5*time.Minute {
 					go func() {
@@ -175,13 +324,11 @@ func loadCmd() tea.Cmd {
 				}
 			}
 		}
-
 		var state AtlasState
 		if err := json.Unmarshal(data, &state); err != nil {
 			return atlasMsg{err: fmt.Errorf("parse: %w", err)}
 		}
-
-		return atlasMsg{items: buildItems(state)}
+		return atlasMsg{state: &state}
 	}
 }
 
@@ -201,43 +348,8 @@ func refreshCmd() tea.Cmd {
 		if err := json.Unmarshal(data, &state); err != nil {
 			return atlasMsg{err: fmt.Errorf("parse: %w", err)}
 		}
-		return atlasMsg{items: buildItems(state)}
+		return atlasMsg{state: &state}
 	}
-}
-
-func buildItems(state AtlasState) []DisplayItem {
-	var items []DisplayItem
-
-	pinnedSet := make(map[string]bool)
-	for _, p := range state.Pinned {
-		pinnedSet[p.Type+"/"+p.Name] = true
-	}
-	// Active projects are implicitly pinned
-	for _, s := range state.Sections {
-		if s.Section == "active" {
-			for _, e := range s.Entries {
-				pinnedSet[e.Type+"/"+e.Name] = true
-			}
-			break
-		}
-	}
-
-	for _, section := range state.Sections {
-		if len(section.Entries) == 0 {
-			continue
-		}
-		items = append(items, DisplayItem{
-			IsHeader:    true,
-			SectionName: section.Label,
-			EntryCount:  len(section.Entries),
-		})
-		for _, entry := range section.Entries {
-			pinned := pinnedSet[entry.Type+"/"+entry.Name]
-			items = append(items, DisplayItem{Entry: entry, IsPinned: pinned})
-		}
-	}
-
-	return items
 }
 
 func checkConnectivity(name, host string) tea.Cmd {
@@ -274,6 +386,41 @@ func unpinCmd(entryType, name string) tea.Cmd {
 }
 
 // ---------------------------------------------------------------------------
+// List building (for drill-down)
+// ---------------------------------------------------------------------------
+
+func buildListItems(state *AtlasState, sectionID string) []DisplayItem {
+	if state == nil {
+		return nil
+	}
+	pinnedSet := make(map[string]bool)
+	for _, p := range state.Pinned {
+		pinnedSet[p.Type+"/"+p.Name] = true
+	}
+	for _, s := range state.Sections {
+		if s.Section == "active" {
+			for _, e := range s.Entries {
+				pinnedSet[e.Type+"/"+e.Name] = true
+			}
+		}
+	}
+
+	var items []DisplayItem
+	for _, section := range state.Sections {
+		if section.Section != sectionID {
+			continue
+		}
+		for _, entry := range section.Entries {
+			items = append(items, DisplayItem{
+				Entry:    entry,
+				IsPinned: pinnedSet[entry.Type+"/"+entry.Name],
+			})
+		}
+	}
+	return items
+}
+
+// ---------------------------------------------------------------------------
 // Update
 // ---------------------------------------------------------------------------
 
@@ -298,18 +445,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.loadErr = msg.err
 		} else {
-			m.items = msg.items
+			m.state = msg.state
 			m.loadErr = nil
-			if m.cursor >= len(m.items) {
-				m.cursor = max(0, len(m.items)-1)
-			}
-			m.snapCursor()
 			// Probe remotes
 			var cmds []tea.Cmd
-			for _, item := range m.items {
-				if item.Entry.Type == "remote" && item.Entry.Host != "" {
-					cmds = append(cmds, checkConnectivity(item.Entry.Name, item.Entry.Host))
+			for _, e := range m.sectionEntries("remote") {
+				if e.Host != "" {
+					cmds = append(cmds, checkConnectivity(e.Name, e.Host))
 				}
+			}
+			// If in list mode, rebuild list items
+			if m.viewMode == ModeList {
+				sid := cardDefs[m.cardCursor].match
+				m.listItems = buildListItems(m.state, sid)
 			}
 			if len(cmds) > 0 {
 				return m, tea.Batch(cmds...)
@@ -322,57 +470,89 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		switch m.viewMode {
+		case ModeDashboard:
+			return m.updateDashboard(msg)
+		case ModeList:
+			return m.updateList(msg)
+		}
 	}
 
 	return m, nil
 }
 
-func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+// ---------------------------------------------------------------------------
+// Update — Dashboard
+// ---------------------------------------------------------------------------
+
+func (m model) updateDashboard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 
+	case "l", "right":
+		if m.cardCursor%2 == 0 && m.cardCursor+1 < len(cardDefs) {
+			m.cardCursor++
+		}
+	case "h", "left":
+		if m.cardCursor%2 == 1 {
+			m.cardCursor--
+		}
 	case "j", "down":
-		m.moveDown()
-
+		if m.cardCursor+2 < len(cardDefs) {
+			m.cardCursor += 2
+		}
 	case "k", "up":
-		m.moveUp()
+		if m.cardCursor-2 >= 0 {
+			m.cardCursor -= 2
+		}
+	case "tab":
+		m.cardCursor = (m.cardCursor + 1) % len(cardDefs)
+	case "shift+tab":
+		m.cardCursor = (m.cardCursor + len(cardDefs) - 1) % len(cardDefs)
 
 	case "enter":
-		if m.cursor < len(m.items) && !m.items[m.cursor].IsHeader {
-			item := m.items[m.cursor]
-			switch item.Entry.Type {
-			case "repo", "dir":
-				path := item.Entry.Path
-				if path != "" {
-					return m, func() tea.Msg {
-						_ = exec.Command("tmux", "new-window", "-n", filepath.Base(path), "-c", path).Start()
-						return nil
-					}
-				}
-			case "github":
-				path := item.Entry.LocalPath
-				if path != "" {
-					return m, func() tea.Msg {
-						_ = exec.Command("tmux", "new-window", "-n", item.Entry.Name, "-c", path).Start()
-						return nil
-					}
-				}
-			case "remote":
-				if item.Entry.Host != "" && item.Entry.User != "" {
-					return m, func() tea.Msg {
-						_ = exec.Command("tmux", "new-window", "-n", "ssh-"+item.Entry.Name,
-							"ssh", fmt.Sprintf("%s@%s", item.Entry.User, item.Entry.Host)).Start()
-						return nil
-					}
-				}
-			}
+		sid := cardDefs[m.cardCursor].match
+		m.listItems = buildListItems(m.state, sid)
+		m.listTitle = cardDefs[m.cardCursor].label
+		m.listCursor = 0
+		m.listScroll = 0
+		m.viewMode = ModeList
+
+	case "r":
+		m.loading = true
+		m.loadErr = nil
+		return m, tea.Batch(m.spinner.Tick, refreshCmd())
+	}
+
+	return m, nil
+}
+
+// ---------------------------------------------------------------------------
+// Update — List
+// ---------------------------------------------------------------------------
+
+func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+
+	case "esc", "backspace":
+		m.viewMode = ModeDashboard
+		return m, nil
+
+	case "j", "down":
+		if m.listCursor < len(m.listItems)-1 {
+			m.listCursor++
+		}
+	case "k", "up":
+		if m.listCursor > 0 {
+			m.listCursor--
 		}
 
-	case "e":
-		if m.cursor < len(m.items) && !m.items[m.cursor].IsHeader {
-			item := m.items[m.cursor]
+	case "enter", "e":
+		if m.listCursor < len(m.listItems) {
+			item := m.listItems[m.listCursor]
 			path := item.Entry.Path
 			if path == "" {
 				path = item.Entry.LocalPath
@@ -383,7 +563,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return nil
 				}
 			}
-			if item.Entry.Type == "remote" && item.Entry.Host != "" {
+			if item.Entry.Type == "remote" && item.Entry.Host != "" && item.Entry.User != "" {
 				return m, func() tea.Msg {
 					_ = exec.Command("tmux", "new-window", "-n", "ssh-"+item.Entry.Name,
 						"ssh", fmt.Sprintf("%s@%s", item.Entry.User, item.Entry.Host)).Start()
@@ -393,8 +573,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "a":
-		if m.cursor < len(m.items) && !m.items[m.cursor].IsHeader {
-			item := m.items[m.cursor]
+		if m.listCursor < len(m.listItems) {
+			item := m.listItems[m.listCursor]
 			path := item.Entry.Path
 			if path == "" {
 				path = item.Entry.LocalPath
@@ -408,20 +588,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case "o":
-		if m.cursor < len(m.items) && !m.items[m.cursor].IsHeader {
-			item := m.items[m.cursor]
-			if item.Entry.Path != "" {
-				return m, func() tea.Msg {
-					_ = exec.Command("open", "-R", item.Entry.Path).Start()
-					return nil
-				}
-			}
-		}
-
 	case "p":
-		if m.cursor < len(m.items) && !m.items[m.cursor].IsHeader {
-			item := m.items[m.cursor]
+		if m.listCursor < len(m.listItems) {
+			item := m.listItems[m.listCursor]
 			if item.IsPinned {
 				return m, unpinCmd(item.Entry.Type, item.Entry.Name)
 			}
@@ -430,7 +599,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		m.loading = true
-		m.loadErr = nil
 		return m, tea.Batch(m.spinner.Tick, refreshCmd())
 	}
 
@@ -438,132 +606,373 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// Cursor helpers
-// ---------------------------------------------------------------------------
-
-func (m *model) snapCursor() {
-	if len(m.items) == 0 {
-		m.cursor = 0
-		return
-	}
-	if m.cursor >= len(m.items) {
-		m.cursor = len(m.items) - 1
-	}
-	if m.items[m.cursor].IsHeader {
-		m.moveDown()
-	}
-}
-
-func (m *model) moveDown() {
-	start := m.cursor
-	for {
-		if m.cursor >= len(m.items)-1 {
-			m.cursor = start
-			return
-		}
-		m.cursor++
-		if !m.items[m.cursor].IsHeader {
-			return
-		}
-	}
-}
-
-func (m *model) moveUp() {
-	start := m.cursor
-	for {
-		if m.cursor <= 0 {
-			m.cursor = start
-			return
-		}
-		m.cursor--
-		if !m.items[m.cursor].IsHeader {
-			return
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
 
 func (m model) View() string {
+	switch m.viewMode {
+	case ModeDashboard:
+		return m.viewDashboard()
+	case ModeList:
+		return m.viewList()
+	}
+	return ""
+}
+
+// ---------------------------------------------------------------------------
+// View — Dashboard
+// ---------------------------------------------------------------------------
+
+func (m model) viewDashboard() string {
 	var b strings.Builder
 	w := m.width
 	if w <= 0 {
-		w = 70
-	}
-
-	// Available height for items (minus title + separator + footer)
-	viewH := m.height - 4
-	if viewH < 5 {
-		viewH = 20
+		w = 100
 	}
 
 	// Title
 	title := titleStyle.Render("  Map")
 	total := 0
-	for _, item := range m.items {
-		if !item.IsHeader {
-			total++
+	if m.state != nil {
+		for _, s := range m.state.Sections {
+			total += len(s.Entries)
 		}
 	}
-	countStr := dimStyle.Render(fmt.Sprintf("%d entries", total))
+	countStr := dimStyle.Render(fmt.Sprintf("%d entries · %d sections", total, len(cardDefs)))
 	pad := w - lipgloss.Width(title) - lipgloss.Width(countStr)
 	if pad < 1 {
 		pad = 1
 	}
 	b.WriteString(title + strings.Repeat(" ", pad) + countStr + "\n")
-	b.WriteString(dimStyle.Render("  "+strings.Repeat("─", max(0, w-4))) + "\n")
 
-	if m.loading && len(m.items) == 0 {
+	if m.loading && m.state == nil {
 		b.WriteString("\n  " + m.spinner.View() + " Loading atlas...\n")
 		return b.String()
 	}
-
-	if m.loadErr != nil && len(m.items) == 0 {
+	if m.loadErr != nil && m.state == nil {
 		b.WriteString("\n  " + errStyle.Render("Error: "+m.loadErr.Error()) + "\n")
 		b.WriteString("\n  " + dimStyle.Render("r=retry  q=quit") + "\n")
 		return b.String()
 	}
 
-	// Scroll: keep cursor in view
-	if m.cursor < m.scroll {
-		m.scroll = m.cursor
-	}
-	if m.cursor >= m.scroll+viewH {
-		m.scroll = m.cursor - viewH + 1
-	}
-	if m.scroll < 0 {
-		m.scroll = 0
+	cardW := (w - 5) / 2 // 2 cols, 1 gap, 2 margin
+	if cardW < 30 {
+		cardW = 30
 	}
 
-	// Render visible items
-	end := m.scroll + viewH
-	if end > len(m.items) {
-		end = len(m.items)
+	// Row 0: Active Projects + Remote (detailed, more lines)
+	row0 := lipgloss.JoinHorizontal(lipgloss.Top,
+		m.renderCard(0, cardW, 6),
+		" ",
+		m.renderCard(1, cardW, 6),
+	)
+	b.WriteString("  " + row0 + "\n")
+
+	// Row 1: GitHub + Desktop (summary, fewer lines)
+	row1 := lipgloss.JoinHorizontal(lipgloss.Top,
+		m.renderCard(2, cardW, 3),
+		" ",
+		m.renderCard(3, cardW, 3),
+	)
+	b.WriteString("  " + row1 + "\n")
+
+	// Row 2: iCloud + Drives (compact)
+	row2 := lipgloss.JoinHorizontal(lipgloss.Top,
+		m.renderCard(4, cardW, 1),
+		" ",
+		m.renderCard(5, cardW, 1),
+	)
+	b.WriteString("  " + row2 + "\n")
+
+	// Refresh indicator
+	if m.loading && m.state != nil {
+		b.WriteString("  " + m.spinner.View() + " refreshing...\n")
 	}
 
-	for i := m.scroll; i < end; i++ {
-		item := m.items[i]
-		if item.IsHeader {
-			label := item.SectionName
-			if item.EntryCount > 0 {
-				label += dimStyle.Render(fmt.Sprintf(" (%d)", item.EntryCount))
-			}
-			if i > 0 {
-				b.WriteString("\n")
-			}
-			b.WriteString("  " + sectionStyle.Render(label) + "\n")
-			continue
+	// Footer with selected card name
+	selName := cardDefs[m.cardCursor].label
+	b.WriteString(footerStyle.Render(fmt.Sprintf("  ▸ %s", selName)) + "\n")
+	b.WriteString(footerStyle.Render("  ←→↑↓/hjkl=nav  Tab=cycle  ⏎=expand  r=refresh  q=quit") + "\n")
+
+	return b.String()
+}
+
+func (m model) renderCard(cardIdx, cardWidth, maxLines int) string {
+	if cardIdx >= len(cardDefs) {
+		return ""
+	}
+	def := cardDefs[cardIdx]
+	entries := m.sectionEntries(def.match)
+	count := len(entries)
+	selected := cardIdx == m.cardCursor
+
+	style := cardDim.Width(cardWidth - 2)
+	if selected {
+		style = cardSelected.Width(cardWidth - 2)
+	}
+
+	contentW := cardWidth - 6 // borders + padding
+
+	// Header
+	header := sectionStyle.Render(def.label) + " " + dimStyle.Render(fmt.Sprintf("(%d)", count))
+
+	// Body
+	var body string
+	switch def.id {
+	case "active":
+		body = m.cardActive(entries, maxLines, contentW)
+	case "remote":
+		body = m.cardRemote(entries, maxLines, contentW)
+	case "github":
+		body = m.cardGithub(entries, maxLines, contentW)
+	case "desktop":
+		body = m.cardDesktop(entries, maxLines, contentW)
+	case "icloud":
+		body = m.cardIcloud(entries, contentW)
+	case "drives":
+		body = m.cardDrives(contentW)
+	}
+
+	if body == "" {
+		body = dimStyle.Render("empty")
+	}
+
+	return style.Render(header + "\n" + body)
+}
+
+func (m model) cardActive(entries []AtlasEntry, maxLines, contentW int) string {
+	if len(entries) == 0 {
+		return dimStyle.Render("no projects")
+	}
+	nameW := 13
+	barW := 8
+	show := maxLines
+	if len(entries) > show {
+		show = maxLines - 1 // reserve for "+N more"
+	} else {
+		show = len(entries)
+	}
+
+	var lines []string
+	for i := 0; i < show; i++ {
+		e := entries[i]
+		name := truncate(e.Name, nameW)
+
+		dirty := "  "
+		if d := e.Dirty; d != "" && d != "0" {
+			dirty = orangeStyle.Render("Δ ")
 		}
 
-		selected := i == m.cursor
+		branch := truncate(e.Branch, 7)
+		bar := activityBar(e.LastCommit, barW)
+		ago := shortAgo(e.LastCommit)
+
+		line := fmt.Sprintf("%-*s%s%-7s %s %s",
+			nameW, name, dirty, branch, bar, dimStyle.Render(ago))
+		lines = append(lines, line)
+	}
+	if len(entries) > maxLines {
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("+%d more", len(entries)-show)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m model) cardRemote(entries []AtlasEntry, maxLines, contentW int) string {
+	if len(entries) == 0 {
+		return dimStyle.Render("no hosts")
+	}
+	nameW := 16
+	show := maxLines
+	if len(entries) > show {
+		show = maxLines - 1
+	} else {
+		show = len(entries)
+	}
+
+	var lines []string
+	for i := 0; i < show; i++ {
+		e := entries[i]
+		name := truncate(e.Name, nameW)
+
+		dot := dimStyle.Render("○")
+		if reachable, probed := m.deviceStatus[e.Name]; probed {
+			if reachable {
+				dot = greenStyle.Render("●")
+			} else {
+				dot = errStyle.Render("●")
+			}
+		}
+
+		desc := e.Description
+		if desc == "" {
+			desc = e.OS
+		}
+		desc = truncate(desc, contentW-nameW-4)
+
+		line := dot + " " + cyanStyle.Render(fmt.Sprintf("%-*s", nameW, name)) + " " + dimStyle.Render(desc)
+		lines = append(lines, line)
+	}
+	if len(entries) > maxLines {
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("+%d more", len(entries)-show)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m model) cardGithub(entries []AtlasEntry, maxLines, contentW int) string {
+	if len(entries) == 0 {
+		return dimStyle.Render("gh not available")
+	}
+	total := len(entries)
+	cloned := 0
+	for _, e := range entries {
+		if e.LocalPath != "" {
+			cloned++
+		}
+	}
+
+	barW := max(contentW-20, 8)
+	bar := renderBar(cloned, total, barW)
+
+	line1 := bar + " " + greenStyle.Render(fmt.Sprintf("%d", cloned)) + dimStyle.Render(" cloned")
+	line2 := dimStyle.Render(fmt.Sprintf("%d remote only", total-cloned))
+
+	// Top recent repos
+	var top []string
+	for i := 0; i < len(entries) && len(top) < 3; i++ {
+		top = append(top, truncate(entries[i].Name, 12))
+	}
+	line3 := dimStyle.Render("recent: ") + normalStyle.Render(strings.Join(top, " "))
+
+	lines := []string{line1, line2}
+	if maxLines >= 3 {
+		lines = append(lines, line3)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m model) cardDesktop(entries []AtlasEntry, maxLines, contentW int) string {
+	if len(entries) == 0 {
+		return dimStyle.Render("empty")
+	}
+	repos := 0
+	dirty := 0
+	for _, e := range entries {
+		if e.Type == "repo" {
+			repos++
+			if d, err := strconv.Atoi(e.Dirty); err == nil && d > 0 {
+				dirty++
+			} else if e.Dirty == "+" || e.Dirty == "1" {
+				dirty++
+			}
+		}
+	}
+	other := len(entries) - repos
+	clean := repos - dirty
+
+	line1 := normalStyle.Render(fmt.Sprintf("%d repos", repos)) + dimStyle.Render(fmt.Sprintf(" · %d other", other))
+
+	barW := max(contentW-22, 6)
+	bar := renderBar(dirty, repos, barW)
+	line2 := bar + " " + orangeStyle.Render(fmt.Sprintf("%d dirty", dirty)) + dimStyle.Render(fmt.Sprintf(" · %d clean", clean))
+
+	var top []string
+	for i := 0; i < len(entries) && len(top) < 3; i++ {
+		if entries[i].Type == "repo" {
+			top = append(top, truncate(entries[i].Name, 12))
+		}
+	}
+	line3 := dimStyle.Render("recent: ") + normalStyle.Render(strings.Join(top, " "))
+
+	lines := []string{line1, line2}
+	if maxLines >= 3 {
+		lines = append(lines, line3)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m model) cardIcloud(entries []AtlasEntry, contentW int) string {
+	if len(entries) == 0 {
+		return dimStyle.Render("not available")
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, truncate(e.Name, 12)+"/")
+	}
+	return dimStyle.Render(strings.Join(names, "  "))
+}
+
+func (m model) cardDrives(contentW int) string {
+	entries := m.sectionEntries("drive")
+	if len(entries) == 0 {
+		// Check for drive sections with label
+		if m.state != nil {
+			for _, s := range m.state.Sections {
+				if s.Section == "drive" {
+					if len(s.Entries) == 0 {
+						return dimStyle.Render(s.Label + " — not mounted")
+					}
+					return normalStyle.Render(s.Label) + dimStyle.Render(fmt.Sprintf(" · %d items", len(s.Entries)))
+				}
+			}
+		}
+		return dimStyle.Render("no drives configured")
+	}
+	return normalStyle.Render(fmt.Sprintf("%d items", len(entries)))
+}
+
+// ---------------------------------------------------------------------------
+// View — List (drill-down)
+// ---------------------------------------------------------------------------
+
+func (m model) viewList() string {
+	var b strings.Builder
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+
+	viewH := m.height - 5
+	if viewH < 5 {
+		viewH = 20
+	}
+
+	// Breadcrumb
+	crumb := dimStyle.Render("  Map") + dimStyle.Render(" > ") + titleStyle.Render(m.listTitle)
+	countStr := dimStyle.Render(fmt.Sprintf("%d entries", len(m.listItems)))
+	pad := w - lipgloss.Width(crumb) - lipgloss.Width(countStr)
+	if pad < 1 {
+		pad = 1
+	}
+	b.WriteString(crumb + strings.Repeat(" ", pad) + countStr + "\n")
+	b.WriteString(dimStyle.Render("  "+strings.Repeat("─", max(0, w-4))) + "\n")
+
+	if len(m.listItems) == 0 {
+		b.WriteString("\n  " + dimStyle.Render("empty") + "\n")
+		b.WriteString("\n" + footerStyle.Render("  Esc=back  q=quit") + "\n")
+		return b.String()
+	}
+
+	// Scroll
+	if m.listCursor < m.listScroll {
+		m.listScroll = m.listCursor
+	}
+	if m.listCursor >= m.listScroll+viewH {
+		m.listScroll = m.listCursor - viewH + 1
+	}
+
+	end := m.listScroll + viewH
+	if end > len(m.listItems) {
+		end = len(m.listItems)
+	}
+
+	for i := m.listScroll; i < end; i++ {
+		item := m.listItems[i]
+		selected := i == m.listCursor
 		prefix := "  "
 		if selected {
 			prefix = "▸ "
 		}
 
-		// Pin indicator
 		pin := "  "
 		if item.IsPinned {
 			pin = purpleStyle.Render("★ ")
@@ -571,88 +980,73 @@ func (m model) View() string {
 
 		switch item.Entry.Type {
 		case "repo":
-			b.WriteString(m.renderRepo(item, prefix, pin, selected, w))
+			b.WriteString(m.listRenderRepo(item, prefix, pin, selected, w))
 		case "github":
-			b.WriteString(m.renderGithub(item, prefix, pin, selected))
+			b.WriteString(m.listRenderGithub(item, prefix, pin, selected, w))
 		case "remote":
-			b.WriteString(m.renderRemote(item, prefix, pin, selected))
+			b.WriteString(m.listRenderRemote(item, prefix, pin, selected))
 		case "dir":
-			b.WriteString(m.renderDir(item, prefix, pin, selected))
-		default:
-			name := item.Entry.Name
-			if len(name) > 20 {
-				name = name[:19] + "…"
+			name := item.Entry.Name + "/"
+			if len(name) > 24 {
+				name = name[:23] + "…"
 			}
+			if selected {
+				b.WriteString("  " + selectedStyle.Render(prefix) + pin + selectedStyle.Render(name) + "\n")
+			} else {
+				b.WriteString("  " + dimStyle.Render(prefix) + pin + dimStyle.Render(name) + "\n")
+			}
+		default:
+			name := truncate(item.Entry.Name, 24)
 			b.WriteString("  " + dimStyle.Render(prefix+pin+name) + "\n")
 		}
 	}
 
-	// Refresh indicator
-	if m.loading && len(m.items) > 0 {
-		b.WriteString("\n  " + m.spinner.View() + " refreshing...")
-	}
-
 	b.WriteString("\n")
-	b.WriteString(footerStyle.Render("  ↑↓=nav  ⏎=open  e=shell  a=agent  p=pin  o=finder  r=refresh  q=quit"))
-	b.WriteString("\n")
+	b.WriteString(footerStyle.Render("  ↑↓=nav  ⏎/e=open  a=agent  p=pin  Esc=back  q=quit") + "\n")
 
 	return b.String()
 }
 
-func (m model) renderRepo(item DisplayItem, prefix, pin string, selected bool, w int) string {
-	name := item.Entry.Name
-	if len(name) > 18 {
-		name = name[:17] + "…"
-	}
-	nameCol := fmt.Sprintf("%-18s", name)
-
-	branch := item.Entry.Branch
-	if len(branch) > 8 {
-		branch = branch[:7] + "…"
-	}
-
-	dirty := ""
+func (m model) listRenderRepo(item DisplayItem, prefix, pin string, selected bool, w int) string {
+	name := truncate(item.Entry.Name, 20)
+	nameCol := fmt.Sprintf("%-20s", name)
+	dirty := "  "
 	if d := item.Entry.Dirty; d != "" && d != "0" {
-		dirty = orangeStyle.Render("Δ")
+		dirty = orangeStyle.Render("Δ ")
 	}
+	branch := truncate(item.Entry.Branch, 10)
+	bar := activityBar(item.Entry.LastCommit, 8)
+	ago := shortAgo(item.Entry.LastCommit)
 
 	if selected {
-		return "  " + selectedStyle.Render(prefix) + pin + selectedStyle.Render(nameCol) + " " +
-			dimStyle.Render(branch) + " " + dirty + " " + dimStyle.Render(item.Entry.LastCommit) + "\n"
+		return "  " + selectedStyle.Render(prefix) + pin + selectedStyle.Render(nameCol) + dirty +
+			dimStyle.Render(fmt.Sprintf("%-10s", branch)) + " " + bar + " " + dimStyle.Render(ago) + "\n"
 	}
-	return "  " + normalStyle.Render(prefix) + pin + normalStyle.Render(nameCol) + " " +
-		dimStyle.Render(branch) + " " + dirty + " " + dimStyle.Render(item.Entry.LastCommit) + "\n"
+	return "  " + normalStyle.Render(prefix) + pin + normalStyle.Render(nameCol) + dirty +
+		dimStyle.Render(fmt.Sprintf("%-10s", branch)) + " " + bar + " " + dimStyle.Render(ago) + "\n"
 }
 
-func (m model) renderGithub(item DisplayItem, prefix, pin string, selected bool) string {
-	name := item.Entry.Name
-	if len(name) > 18 {
-		name = name[:17] + "…"
-	}
-	nameCol := fmt.Sprintf("%-18s", name)
-
+func (m model) listRenderGithub(item DisplayItem, prefix, pin string, selected bool, w int) string {
+	name := truncate(item.Entry.Name, 20)
+	nameCol := fmt.Sprintf("%-20s", name)
 	clone := dimStyle.Render("✗")
 	if item.Entry.LocalPath != "" {
 		clone = greenStyle.Render("✓")
 	}
-
 	vis := item.Entry.Visibility
+	date := item.Entry.UpdatedAt
 
 	if selected {
 		return "  " + selectedStyle.Render(prefix) + pin + selectedStyle.Render(nameCol) + " " +
-			clone + " " + dimStyle.Render(vis) + " " + dimStyle.Render(item.Entry.UpdatedAt) + "\n"
+			clone + " " + dimStyle.Render(vis) + " " + dimStyle.Render(date) + "\n"
 	}
 	return "  " + normalStyle.Render(prefix) + pin + normalStyle.Render(nameCol) + " " +
-		clone + " " + dimStyle.Render(vis) + " " + dimStyle.Render(item.Entry.UpdatedAt) + "\n"
+		clone + " " + dimStyle.Render(vis) + " " + dimStyle.Render(date) + "\n"
 }
 
-func (m model) renderRemote(item DisplayItem, prefix, pin string, selected bool) string {
-	name := item.Entry.Name
-	if len(name) > 16 {
-		name = name[:15] + "…"
-	}
-	nameCol := fmt.Sprintf("%-16s", name)
-
+func (m model) listRenderRemote(item DisplayItem, prefix, pin string, selected bool) string {
+	name := truncate(item.Entry.Name, 18)
+	nameCol := fmt.Sprintf("%-18s", name)
 	dot := dimStyle.Render("○")
 	if reachable, probed := m.deviceStatus[item.Entry.Name]; probed {
 		if reachable {
@@ -661,7 +1055,6 @@ func (m model) renderRemote(item DisplayItem, prefix, pin string, selected bool)
 			dot = errStyle.Render("●")
 		}
 	}
-
 	desc := item.Entry.Description
 	if desc == "" {
 		desc = item.Entry.OS
@@ -673,28 +1066,9 @@ func (m model) renderRemote(item DisplayItem, prefix, pin string, selected bool)
 	return "  " + cyanStyle.Render(prefix) + pin + dot + " " + cyanStyle.Render(nameCol) + " " + dimStyle.Render(desc) + "\n"
 }
 
-func (m model) renderDir(item DisplayItem, prefix, pin string, selected bool) string {
-	name := item.Entry.Name + "/"
-	if len(name) > 20 {
-		name = name[:19] + "…"
-	}
-
-	if selected {
-		return "  " + selectedStyle.Render(prefix) + pin + selectedStyle.Render(name) + "\n"
-	}
-	return "  " + dimStyle.Render(prefix) + pin + dimStyle.Render(name) + "\n"
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
 
 func main() {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
