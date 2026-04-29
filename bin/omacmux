@@ -635,7 +635,7 @@ ${BOLD}Init options:${NC}
   --skip-existing   Non-interactive: skip any file that already exists
 
 ${BOLD}Install via Homebrew:${NC}
-  brew install aadarwal/omacmux/omacmux
+  brew install aadarwal/tap/omacmux
   omacmux init
 
 ${BOLD}Install via git clone:${NC}

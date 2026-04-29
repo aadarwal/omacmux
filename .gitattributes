@@ -1,0 +1,28 @@
+# Exclude paths from `git archive` output (release tarballs).
+# Brew users get a much smaller, cleaner tarball; clone-based installs
+# are unaffected because `git archive` is only used by GitHub releases.
+
+# Runtime state that should not have been committed
+swarms/             export-ignore
+takeover/           export-ignore
+autocommit/         export-ignore
+voice/state.json    export-ignore
+init/profile.md     export-ignore
+
+# Heavy paths only useful to clone-based installs (paths hardcoded to ~/omacmux)
+desktop/            export-ignore
+wallpapers/         export-ignore
+remote/             export-ignore
+
+# Formula source-of-truth lives in aadarwal/homebrew-tap
+Formula/            export-ignore
+
+# Defensive guards for WIP scratch buckets, in case any get committed
+atlas/              export-ignore
+scans/              export-ignore
+www_ideas/          export-ignore
+running.md          export-ignore
+.claude/            export-ignore
+
+# Repo-tooling files don't need to ship in release tarballs
+.gitattributes      export-ignore

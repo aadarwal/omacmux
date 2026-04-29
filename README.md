@@ -20,7 +20,7 @@ Everything is a shell function. Everything is composable. Everything is yours to
 ### Option A: Homebrew (recommended)
 
 ```bash
-brew install aadarwal/omacmux/omacmux
+brew install aadarwal/tap/omacmux
 omacmux init
 ```
 
