@@ -5,7 +5,7 @@
 # Internal registry of all config files
 # Returns tab-delimited: category\tname\tpath\tdescription
 _cfgmap_entries() {
-  local p="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"
+  local p="${ANU_PATH:-$HOME/.local/share/anu}"
   local cyan='\033[36m' green='\033[32m' yellow='\033[33m'
   local magenta='\033[35m' blue='\033[34m' red='\033[31m'
   local bcyan='\033[1;36m' dim='\033[2m' reset='\033[0m'

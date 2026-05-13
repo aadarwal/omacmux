@@ -18,7 +18,7 @@
 # Internal helpers
 # ------------------------------------------------------------------------------
 
-REVIEW_DIR="$HOME/.local/share/omacmux/reviews"
+REVIEW_DIR="$HOME/.local/share/anu/reviews"
 
 _review_ensure_dirs() {
   mkdir -p "$REVIEW_DIR"/{commits,branches,conflicts}
@@ -142,7 +142,7 @@ _review_branch_stats() {
 
 # Source path for FZF subshells
 _review_src() {
-  echo "${OMACMUX_PATH:-$HOME/.local/share/omacmux}/config/bash/fns/review"
+  echo "${ANU_PATH:-$HOME/.local/share/anu}/config/bash/fns/review"
 }
 
 # Collect branches to review, populating _rv_branches and _rv_agents arrays.
@@ -156,12 +156,12 @@ _review_collect_branches() {
 
   local swarm_dir=""
   if [[ -n "$swarm_id" ]]; then
-    swarm_dir="$HOME/.local/share/omacmux/swarms/$swarm_id"
+    swarm_dir="$HOME/.local/share/anu/swarms/$swarm_id"
     [[ ! -d "$swarm_dir" ]] && return 1
   else
     local current_swarm
     current_swarm=$(tmux show-option -wqv @swarm_id 2>/dev/null)
-    [[ -n "$current_swarm" ]] && swarm_dir="$HOME/.local/share/omacmux/swarms/$current_swarm"
+    [[ -n "$current_swarm" ]] && swarm_dir="$HOME/.local/share/anu/swarms/$current_swarm"
   fi
 
   if [[ -n "$swarm_dir" && -d "$swarm_dir" ]]; then
@@ -399,7 +399,7 @@ _reviewd_render() {
   local swarm_dir=""
   local current_swarm
   current_swarm=$(tmux show-option -wqv @swarm_id 2>/dev/null)
-  [[ -n "$current_swarm" ]] && swarm_dir="$HOME/.local/share/omacmux/swarms/$current_swarm"
+  [[ -n "$current_swarm" ]] && swarm_dir="$HOME/.local/share/anu/swarms/$current_swarm"
 
   local -a branches agents
   if [[ -n "$swarm_dir" && -d "$swarm_dir" ]]; then
@@ -457,7 +457,7 @@ review() {
       else
         # Could be swarm_id or agent name
         # Check if it's a swarm directory first
-        if [[ -d "$HOME/.local/share/omacmux/swarms/$1" ]]; then
+        if [[ -d "$HOME/.local/share/anu/swarms/$1" ]]; then
           _review_overview "$1"
         elif git rev-parse --verify "$1" &>/dev/null; then
           # It's a branch/ref -- treat as agent drilldown

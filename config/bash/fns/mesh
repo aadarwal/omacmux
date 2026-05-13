@@ -8,7 +8,7 @@
 
 # Refresh cached tailscale status (respects TTL)
 _mesh_refresh() {
-  local cache_dir="$HOME/.local/share/omacmux/mesh"
+  local cache_dir="$HOME/.local/share/anu/mesh"
   local cache_file="$cache_dir/devices.json"
   local meta_file="$cache_dir/devices.meta"
   local max_age="${MESH_CACHE_TTL:-30}"
@@ -33,7 +33,7 @@ _mesh_devices() {
   local filter="${1:-compute}"
   _mesh_refresh || return 1
 
-  local cache="$HOME/.local/share/omacmux/mesh/devices.json"
+  local cache="$HOME/.local/share/anu/mesh/devices.json"
   local self_name
   self_name=$(jq -r '.Self.DNSName | split(".")[0]' "$cache")
 
@@ -87,7 +87,7 @@ _mesh_devices() {
 
 # Parse manual SSH hosts from hosts.json as TSV (same format as _mesh_devices)
 _mesh_manual_hosts() {
-  local hosts_file="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/mesh/hosts.json"
+  local hosts_file="${ANU_PATH:-$HOME/.local/share/anu}/mesh/hosts.json"
   [[ -f "$hosts_file" ]] || return 0
 
   jq -r '.[] | [
@@ -117,7 +117,7 @@ _mesh_all_devices() {
 # Preview info for a manual host
 _mesh_manual_info() {
   local name="$1"
-  local hosts_file="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/mesh/hosts.json"
+  local hosts_file="${ANU_PATH:-$HOME/.local/share/anu}/mesh/hosts.json"
   [[ -f "$hosts_file" ]] || { echo "No hosts file."; return 1; }
 
   jq -r --arg name "$name" '
@@ -147,7 +147,7 @@ _mesh_preview() {
 # Check if a device name is a manual host
 _mesh_is_manual() {
   local name="$1"
-  local hosts_file="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/mesh/hosts.json"
+  local hosts_file="${ANU_PATH:-$HOME/.local/share/anu}/mesh/hosts.json"
   [[ -f "$hosts_file" ]] && jq -e --arg n "$name" '.[] | select(.name == $n)' "$hosts_file" >/dev/null 2>&1
 }
 
@@ -155,7 +155,7 @@ _mesh_is_manual() {
 _mesh_is_self() {
   local device="$1"
   _mesh_refresh || return 1
-  local cache="$HOME/.local/share/omacmux/mesh/devices.json"
+  local cache="$HOME/.local/share/anu/mesh/devices.json"
   local self_name
   self_name=$(jq -r '.Self.DNSName | split(".")[0]' "$cache")
   [[ "$device" == "$self_name" ]]
@@ -163,7 +163,7 @@ _mesh_is_self() {
 
 # Source path for FZF subshells (preview/execute commands run in separate processes)
 _mesh_src() {
-  echo "${OMACMUX_PATH:-$HOME/.local/share/omacmux}/config/bash/fns/mesh"
+  echo "${ANU_PATH:-$HOME/.local/share/anu}/config/bash/fns/mesh"
 }
 
 # FZF single device picker
@@ -208,7 +208,7 @@ _mesh_probe() {
   local device="$1"
   [[ -z "$device" ]] && return 1
 
-  local profile_dir="$HOME/.local/share/omacmux/mesh/profiles"
+  local profile_dir="$HOME/.local/share/anu/mesh/profiles"
   local profile="$profile_dir/$device.json"
   local max_age="${MESH_PROBE_TTL:-300}"
 
@@ -361,7 +361,7 @@ _mesh_probe_display() {
   local device="$1"
   [[ -z "$device" ]] && return 1
 
-  local profile="$HOME/.local/share/omacmux/mesh/profiles/$device.json"
+  local profile="$HOME/.local/share/anu/mesh/profiles/$device.json"
 
   # Run probe if no cached data
   if [[ ! -f "$profile" ]]; then
@@ -428,7 +428,7 @@ _mesh_probe_display() {
 _mesh_info() {
   local device="$1"
   _mesh_refresh 2>/dev/null
-  local cache="$HOME/.local/share/omacmux/mesh/devices.json"
+  local cache="$HOME/.local/share/anu/mesh/devices.json"
   [[ ! -f "$cache" ]] && { echo "No cache data."; return 1; }
 
   local self_name
@@ -531,7 +531,7 @@ _mesh_host_add() {
   local host="${userhost#*@}"
   [[ "$user" == "$host" ]] && { echo "mesh: format must be user@host"; return 1; }
 
-  local hosts_file="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/mesh/hosts.json"
+  local hosts_file="${ANU_PATH:-$HOME/.local/share/anu}/mesh/hosts.json"
   [[ ! -f "$hosts_file" ]] && echo '[]' > "$hosts_file"
 
   if jq -e --arg n "$name" '.[] | select(.name == $n)' "$hosts_file" >/dev/null 2>&1; then
@@ -560,7 +560,7 @@ _mesh_host_rm() {
   local name="$1"
   [[ -z "$name" ]] && { echo "Usage: mesh host rm <name>"; return 1; }
 
-  local hosts_file="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/mesh/hosts.json"
+  local hosts_file="${ANU_PATH:-$HOME/.local/share/anu}/mesh/hosts.json"
   [[ ! -f "$hosts_file" ]] && { echo "mesh: no hosts file."; return 1; }
 
   if ! jq -e --arg n "$name" '.[] | select(.name == $n)' "$hosts_file" >/dev/null 2>&1; then
@@ -576,7 +576,7 @@ _mesh_host_rm() {
 
 # List all manual SSH hosts
 _mesh_host_list() {
-  local hosts_file="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/mesh/hosts.json"
+  local hosts_file="${ANU_PATH:-$HOME/.local/share/anu}/mesh/hosts.json"
   [[ ! -f "$hosts_file" ]] && { echo "No manual hosts configured."; return 0; }
 
   local bold='\033[1m'
@@ -596,8 +596,8 @@ _mesh_host_list() {
 # Generate ~/.ssh/config from Tailscale devices + manual hosts
 _mesh_ssh_config_generate() {
   local config_file="$HOME/.ssh/config"
-  local hosts_file="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/mesh/hosts.json"
-  local ts_cache="$HOME/.local/share/omacmux/mesh/devices.json"
+  local hosts_file="${ANU_PATH:-$HOME/.local/share/anu}/mesh/hosts.json"
+  local ts_cache="$HOME/.local/share/anu/mesh/devices.json"
 
   mkdir -p "$HOME/.ssh"
 
@@ -605,7 +605,7 @@ _mesh_ssh_config_generate() {
   tmp_config=$(mktemp)
 
   cat > "$tmp_config" <<HEADER
-# Auto-generated by omacmux mesh
+# Auto-generated by anu mesh
 # Do NOT edit above the USER CONFIG line — changes will be overwritten
 # Run 'mesh sshconfig' to regenerate
 # Last generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -741,7 +741,7 @@ _mesh_status() {
   local bold='\033[1m'
   local cyan='\033[36m'
   local reset='\033[0m'
-  local profile_dir="$HOME/.local/share/omacmux/mesh/profiles"
+  local profile_dir="$HOME/.local/share/anu/mesh/profiles"
 
   printf "${bold}  %-24s %-8s %-8s %-18s %-7s %s${reset}\n" \
     "DEVICE" "OS" "STATUS" "IP" "LOAD" "MEM"
@@ -789,7 +789,7 @@ _mesh_status() {
 # Resolve SSH user for a Tailscale device (per-device override via mesh/users.json)
 _mesh_device_user() {
   local device="$1"
-  local users_file="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/mesh/users.json"
+  local users_file="${ANU_PATH:-$HOME/.local/share/anu}/mesh/users.json"
   if [[ -f "$users_file" ]]; then
     local user
     user=$(jq -r --arg name "$device" '.[$name] // empty' "$users_file")
@@ -801,7 +801,7 @@ _mesh_device_user() {
 # Resolve Tailscale device name to its IP
 _mesh_device_ip() {
   local device="$1"
-  local cache="$HOME/.local/share/omacmux/mesh/devices.json"
+  local cache="$HOME/.local/share/anu/mesh/devices.json"
   jq -r --arg name "$device" '
     [.Self, (.Peer | to_entries[].value)] |
     map(select((.DNSName | split(".")[0]) == $name)) |
@@ -868,7 +868,7 @@ _mesh_ssh_manual() {
     esac
   done
 
-  local hosts_file="${OMACMUX_PATH:-$HOME/.local/share/omacmux}/mesh/hosts.json"
+  local hosts_file="${ANU_PATH:-$HOME/.local/share/anu}/mesh/hosts.json"
   local host user port
   read -r host user port < <(
     jq -r --arg name "$name" '
@@ -964,7 +964,7 @@ _mesh_ping() {
   # No device specified: ping all online compute devices
   _mesh_refresh || return 1
   local self_name
-  self_name=$(jq -r '.Self.DNSName | split(".")[0]' "$HOME/.local/share/omacmux/mesh/devices.json")
+  self_name=$(jq -r '.Self.DNSName | split(".")[0]' "$HOME/.local/share/anu/mesh/devices.json")
 
   while IFS=$'\t' read -r name os status ip relay is_self; do
     [[ "$is_self" == "self" ]] && continue
@@ -977,7 +977,7 @@ _mesh_ping() {
 
 # Force cache refresh
 _mesh_force_refresh() {
-  local meta_file="$HOME/.local/share/omacmux/mesh/devices.meta"
+  local meta_file="$HOME/.local/share/anu/mesh/devices.meta"
   rm -f "$meta_file"
   _mesh_refresh && echo "mesh: cache refreshed." || echo "mesh: refresh failed."
 }
@@ -991,7 +991,7 @@ _mesh_detail() {
   # Export functions so the subshell can use them
   tmux display-popup -E -w 60% -h 50% -T " $device " \
     "bash -c '
-      source \"${OMACMUX_PATH:-$HOME/omacmux}/config/bash/fns/mesh\"
+      source \"${ANU_PATH:-$HOME/.local/share/anu}/config/bash/fns/mesh\"
       while true; do
         clear
         _mesh_probe \"$device\" >/dev/null 2>&1
@@ -1000,7 +1000,7 @@ _mesh_detail() {
         read -t 5 -n 1 key
         case \"\$key\" in
           q) break ;;
-          r) rm -f \"\$HOME/.local/share/omacmux/mesh/profiles/$device.json\" ;;
+          r) rm -f \"\$HOME/.local/share/anu/mesh/profiles/$device.json\" ;;
         esac
       done
     '"
@@ -1239,7 +1239,7 @@ _mesh_spawn() {
   # Generate swarm state
   local swarm_id
   swarm_id=$(date +%s | shasum | head -c 8)
-  local swarm_dir="$HOME/.local/share/omacmux/swarms/$swarm_id"
+  local swarm_dir="$HOME/.local/share/anu/swarms/$swarm_id"
   local name="mesh-$swarm_id"
   local current_dir="$PWD"
 
@@ -1283,7 +1283,7 @@ _mesh_spawn() {
       local ip suser
       ip=$(_mesh_device_ip "$dev")
       suser=$(_mesh_device_user "$dev")
-      local remote_session="omacmux-$swarm_id"
+      local remote_session="anu-$swarm_id"
 
       ssh "$suser@$ip" -- "tmux new-session -d -s '$remote_session' 2>/dev/null || true" 2>/dev/null
 

@@ -64,7 +64,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.local/share/omacmux/config/claude/notify.sh"
+            "command": "bash ~/.local/share/anu/config/claude/notify.sh"
           }
         ]
       }

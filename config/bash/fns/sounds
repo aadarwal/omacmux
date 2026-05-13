@@ -5,7 +5,7 @@
 # Stub guard: loads before voice alphabetically
 command -v _voice_enabled &>/dev/null || _voice_enabled() { return 1; }
 
-_VOICE_STATE_FILE="$HOME/.local/share/omacmux/voice/state.json"
+_VOICE_STATE_FILE="$HOME/.local/share/anu/voice/state.json"
 
 # _sound_enabled — subprocess-safe check for voice mode
 _sound_enabled() {

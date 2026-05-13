@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# --- Resolve omacmux root (works from symlink or direct invocation) ---
+# --- Resolve anu root (works from symlink or direct invocation) ---
 _resolve_root() {
   local bin="$0"
   # Follow symlinks (macOS readlink -f equivalent)
@@ -13,14 +13,14 @@ _resolve_root() {
   cd "$(dirname "$bin")/.." && pwd
 }
 
-OMACMUX_ROOT="$(_resolve_root)"
-OMACMUX_LINK_PATH="$HOME/.local/share/omacmux"
-OMACMUX_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omacmux"
-MANIFEST="$OMACMUX_STATE_DIR/manifest"
-LEGACY_MANIFEST="$OMACMUX_LINK_PATH/manifest"
+ANU_ROOT="$(_resolve_root)"
+ANU_LINK_PATH="$HOME/.local/share/anu"
+ANU_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/anu"
+MANIFEST="$ANU_STATE_DIR/manifest"
+LEGACY_MANIFEST="$ANU_LINK_PATH/manifest"
 BREW_BASH="/opt/homebrew/bin/bash"
 
-source "$OMACMUX_ROOT/links.sh"
+source "$ANU_ROOT/links.sh"
 
 # --- Colors ---
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
@@ -49,16 +49,16 @@ _file_info() {
 }
 
 _backup_path() {
-  echo "${1}.omacmux-bak.$(date +%Y%m%d_%H%M%S)"
+  echo "${1}.anu-bak.$(date +%Y%m%d_%H%M%S)"
 }
 
 _manifest_init() {
-  mkdir -p "$OMACMUX_STATE_DIR"
+  mkdir -p "$ANU_STATE_DIR"
   if [[ ! -f "$MANIFEST" && -f "$LEGACY_MANIFEST" && "$LEGACY_MANIFEST" != "$MANIFEST" ]]; then
     cp "$LEGACY_MANIFEST" "$MANIFEST"
   fi
   if [[ ! -f "$MANIFEST" ]]; then
-    printf "# omacmux link manifest — do not edit manually\n" > "$MANIFEST"
+    printf "# anu link manifest — do not edit manually\n" > "$MANIFEST"
     printf "# format: strategy\\tsource\\ttarget\\tbackup_path\\n" >> "$MANIFEST"
   fi
 }
@@ -77,43 +77,43 @@ _manifest_entries() {
   awk 'NF && $0 !~ /^#/' "$MANIFEST" || true
 }
 
-_is_omacmux_sourced() {
+_is_anu_sourced() {
   local rel_source="$1" file="$2"
   [[ -f "$file" ]] || return 1
   case "$rel_source" in
     shell/bashrc)
-      grep -Eq '# >>> omacmux shell/bashrc|source "\$OMACMUX_PATH/shell/bashrc"|source .*/omacmux/shell/bashrc' "$file" 2>/dev/null
+      grep -Eq '# >>> anu shell/bashrc|source "\$ANU_PATH/shell/bashrc"|source .*/anu/shell/bashrc' "$file" 2>/dev/null
       ;;
     shell/bash_profile)
-      grep -Eq '# >>> omacmux shell/bash_profile|^\[\[ -f ~/.bashrc \]\] && \. ~/.bashrc$|source ~/.bashrc|\. ~/.bashrc' "$file" 2>/dev/null
+      grep -Eq '# >>> anu shell/bash_profile|^\[\[ -f ~/.bashrc \]\] && \. ~/.bashrc$|source ~/.bashrc|\. ~/.bashrc' "$file" 2>/dev/null
       ;;
     *)
-      grep -Fq "# >>> omacmux $rel_source" "$file" 2>/dev/null || \
-        grep -Fq "source \"$OMACMUX_LINK_PATH/$rel_source\"" "$file" 2>/dev/null
+      grep -Fq "# >>> anu $rel_source" "$file" 2>/dev/null || \
+        grep -Fq "source \"$ANU_LINK_PATH/$rel_source\"" "$file" 2>/dev/null
       ;;
   esac
 }
 
 _ensure_repo_link() {
-  mkdir -p "$(dirname "$OMACMUX_LINK_PATH")"
+  mkdir -p "$(dirname "$ANU_LINK_PATH")"
 
-  if [[ -L "$OMACMUX_LINK_PATH" ]]; then
-    rm "$OMACMUX_LINK_PATH"
-    ln -s "$OMACMUX_ROOT" "$OMACMUX_LINK_PATH"
+  if [[ -L "$ANU_LINK_PATH" ]]; then
+    rm "$ANU_LINK_PATH"
+    ln -s "$ANU_ROOT" "$ANU_LINK_PATH"
     return 0
   fi
 
-  if [[ -e "$OMACMUX_LINK_PATH" ]]; then
-    if [[ "$OMACMUX_LINK_PATH" -ef "$OMACMUX_ROOT" ]]; then
+  if [[ -e "$ANU_LINK_PATH" ]]; then
+    if [[ "$ANU_LINK_PATH" -ef "$ANU_ROOT" ]]; then
       return 0
     fi
-    local bak; bak="$(_backup_path "$OMACMUX_LINK_PATH")"
-    mv "$OMACMUX_LINK_PATH" "$bak"
-    _dim "backed up existing ~/.local/share/omacmux to $(basename "$bak")"
+    local bak; bak="$(_backup_path "$ANU_LINK_PATH")"
+    mv "$ANU_LINK_PATH" "$bak"
+    _dim "backed up existing ~/.local/share/anu to $(basename "$bak")"
   fi
 
-  ln -s "$OMACMUX_ROOT" "$OMACMUX_LINK_PATH"
-  _ok "linked" "~/.local/share/omacmux -> $OMACMUX_ROOT"
+  ln -s "$ANU_ROOT" "$ANU_LINK_PATH"
+  _ok "linked" "~/.local/share/anu -> $ANU_ROOT"
 }
 
 _remove_merge_lines() {
@@ -121,8 +121,8 @@ _remove_merge_lines() {
   local tmp; tmp="$(mktemp)"
   local status=0
   awk '
-    /^# >>> omacmux / { skip = 1; changed = 1; next }
-    /^# <<< omacmux / { skip = 0; next }
+    /^# >>> anu / { skip = 1; changed = 1; next }
+    /^# <<< anu / { skip = 0; next }
     skip { next }
     { print }
     END { if (changed) exit 10 }
@@ -140,7 +140,7 @@ _remove_merge_lines() {
   case "$rel_source" in
     shell/bashrc)
       tmp="$(mktemp)"
-      grep -v -E '^# omacmux$|^export OMACMUX_PATH="\$\{OMACMUX_PATH:-\$HOME/\.local/share/omacmux\}"$|^\[\[ \$- == \*i\* \]\] && source "\$OMACMUX_PATH/shell/bashrc"$' "$target" > "$tmp" 2>/dev/null || true
+      grep -v -E '^# anu$|^export ANU_PATH="\$\{ANU_PATH:-\$HOME/\.local/share/anu\}"$|^\[\[ \$- == \*i\* \]\] && source "\$ANU_PATH/shell/bashrc"$' "$target" > "$tmp" 2>/dev/null || true
       if ! diff -q "$target" "$tmp" &>/dev/null; then
         mv "$tmp" "$target"
         return 0
@@ -170,18 +170,18 @@ _cmd_init() {
     shift
   done
 
-  _info "omacmux init"
+  _info "anu init"
   echo ""
   _manifest_init
 
   # Install Homebrew deps if brew is available
   if command -v brew &>/dev/null; then
     _info "Checking Homebrew dependencies..."
-    HOMEBREW_NO_AUTO_UPDATE=1 brew bundle check --file="$OMACMUX_ROOT/Brewfile" &>/dev/null \
+    HOMEBREW_NO_AUTO_UPDATE=1 brew bundle check --file="$ANU_ROOT/Brewfile" &>/dev/null \
       && _ok "ok" "all dependencies installed" \
       || {
         _warn "installing" "missing dependencies..."
-        HOMEBREW_NO_AUTO_UPDATE=1 brew bundle --file="$OMACMUX_ROOT/Brewfile"
+        HOMEBREW_NO_AUTO_UPDATE=1 brew bundle --file="$ANU_ROOT/Brewfile"
       }
     echo ""
   fi
@@ -199,9 +199,9 @@ _cmd_init() {
 
   local linked=0 skipped=0 merged=0
 
-  for entry in "${OMACMUX_LINKS[@]}"; do
-    omacmux_parse_link "$entry"
-    local src="$OMACMUX_ROOT/$_source"
+  for entry in "${ANU_LINKS[@]}"; do
+    anu_parse_link "$entry"
+    local src="$ANU_ROOT/$_source"
     local dest="$_dest"
     local strategy="$_strategy"
 
@@ -220,7 +220,7 @@ _cmd_init() {
     fi
 
     # Already merged
-    if [[ "$strategy" == "merge" ]] && _is_omacmux_sourced "$_source" "$dest"; then
+    if [[ "$strategy" == "merge" ]] && _is_anu_sourced "$_source" "$dest"; then
       _ok "ok" "$dest (merged)"
       _manifest_add "merge" "$src" "$dest" ""
       merged=$((merged + 1))
@@ -231,7 +231,7 @@ _cmd_init() {
     if [[ ! -e "$dest" && ! -L "$dest" ]]; then
       mkdir -p "$(dirname "$dest")"
       if [[ "$strategy" == "merge" ]]; then
-        # Create a minimal file that sources omacmux
+        # Create a minimal file that sources anu
         _write_merge_stub "$_source" "$dest"
         _ok "created" "$dest (merged)"
         _manifest_add "merge" "$src" "$dest" ""
@@ -290,8 +290,8 @@ _cmd_init() {
 
   # Copy mesh templates
   for f in hosts users; do
-    if [[ ! -f "$OMACMUX_ROOT/mesh/${f}.json" && -f "$OMACMUX_ROOT/mesh/${f}.example.json" ]]; then
-      cp "$OMACMUX_ROOT/mesh/${f}.example.json" "$OMACMUX_ROOT/mesh/${f}.json"
+    if [[ ! -f "$ANU_ROOT/mesh/${f}.json" && -f "$ANU_ROOT/mesh/${f}.example.json" ]]; then
+      cp "$ANU_ROOT/mesh/${f}.example.json" "$ANU_ROOT/mesh/${f}.json"
       _ok "created" "mesh/${f}.json from template"
     fi
   done
@@ -300,7 +300,7 @@ _cmd_init() {
   _info "Done — ${linked} linked, ${merged} merged, ${skipped} skipped"
 
   # Git identity prompt (only if not already configured)
-  local git_cfg="$OMACMUX_ROOT/config/git/config"
+  local git_cfg="$ANU_ROOT/config/git/config"
   if [[ -f "$git_cfg" ]] && ! grep -q '^\[user\]' "$git_cfg" 2>/dev/null; then
     echo ""
     _info "Git identity"
@@ -341,7 +341,7 @@ _prompt_conflict() {
 
   while true; do
     if [[ "$strategy" == "merge" ]]; then
-      printf "    [${GREEN}m${NC}] Merge — append 'source omacmux' to your file\n"
+      printf "    [${GREEN}m${NC}] Merge — append 'source anu' to your file\n"
     fi
     printf "    [${RED}r${NC}] Replace — backup yours, symlink ours\n"
     printf "    [${CYAN}v${NC}] View diff\n"
@@ -378,49 +378,49 @@ _write_merge_stub() {
   case "$rel_source" in
     shell/bashrc)
       cat > "$dest" <<'STUB'
-# >>> omacmux shell/bashrc
-export OMACMUX_PATH="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"
-[[ $- == *i* ]] && source "$OMACMUX_PATH/shell/bashrc"
-# <<< omacmux shell/bashrc
+# >>> anu shell/bashrc
+export ANU_PATH="${ANU_PATH:-$HOME/.local/share/anu}"
+[[ $- == *i* ]] && source "$ANU_PATH/shell/bashrc"
+# <<< anu shell/bashrc
 STUB
       ;;
     shell/bash_profile)
       cat > "$dest" <<'STUB'
-# >>> omacmux shell/bash_profile
+# >>> anu shell/bash_profile
 [[ -f ~/.bashrc ]] && . ~/.bashrc
-# <<< omacmux shell/bash_profile
+# <<< anu shell/bash_profile
 STUB
       ;;
     *)
       # Generic: just source it
-      printf '# >>> omacmux %s\nsource "%s/%s"\n# <<< omacmux %s\n' "$rel_source" '$HOME/.local/share/omacmux' "$rel_source" "$rel_source" > "$dest"
+      printf '# >>> anu %s\nsource "%s/%s"\n# <<< anu %s\n' "$rel_source" '$HOME/.local/share/anu' "$rel_source" "$rel_source" > "$dest"
       ;;
   esac
 }
 
 _append_source_line() {
   local rel_source="$1" dest="$2"
-  _is_omacmux_sourced "$rel_source" "$dest" && return 0
+  _is_anu_sourced "$rel_source" "$dest" && return 0
   case "$rel_source" in
     shell/bashrc)
-      printf '\n# >>> omacmux shell/bashrc\nexport OMACMUX_PATH="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"\n[[ $- == *i* ]] && source "$OMACMUX_PATH/shell/bashrc"\n# <<< omacmux shell/bashrc\n' >> "$dest"
+      printf '\n# >>> anu shell/bashrc\nexport ANU_PATH="${ANU_PATH:-$HOME/.local/share/anu}"\n[[ $- == *i* ]] && source "$ANU_PATH/shell/bashrc"\n# <<< anu shell/bashrc\n' >> "$dest"
       ;;
     shell/bash_profile)
       if ! grep -q '\. ~/.bashrc\|source ~/.bashrc' "$dest" 2>/dev/null; then
-        printf '\n# >>> omacmux shell/bash_profile\n[[ -f ~/.bashrc ]] && . ~/.bashrc\n# <<< omacmux shell/bash_profile\n' >> "$dest"
+        printf '\n# >>> anu shell/bash_profile\n[[ -f ~/.bashrc ]] && . ~/.bashrc\n# <<< anu shell/bash_profile\n' >> "$dest"
       fi
       ;;
     *)
-      printf '\n# >>> omacmux %s\nsource "%s/%s"\n# <<< omacmux %s\n' "$rel_source" '$HOME/.local/share/omacmux' "$rel_source" "$rel_source" >> "$dest"
+      printf '\n# >>> anu %s\nsource "%s/%s"\n# <<< anu %s\n' "$rel_source" '$HOME/.local/share/anu' "$rel_source" "$rel_source" >> "$dest"
       ;;
   esac
 }
 
 _init_help() {
   cat <<EOF
-Usage: omacmux init [OPTIONS]
+Usage: anu init [OPTIONS]
 
-Set up omacmux config files with interactive conflict resolution.
+Set up anu config files with interactive conflict resolution.
 
 Options:
   --replace-all     Replace all existing files (backup originals)
@@ -435,7 +435,7 @@ EOF
 # --- UNLINK ---
 
 _cmd_unlink() {
-  _info "omacmux unlink"
+  _info "anu unlink"
   echo ""
 
   if [[ ! -f "$MANIFEST" ]]; then
@@ -465,12 +465,12 @@ _cmd_unlink() {
         ;;
       merge)
         if [[ -f "$target" ]]; then
-          local rel_source="${source#$OMACMUX_ROOT/}"
+          local rel_source="${source#$ANU_ROOT/}"
           if _remove_merge_lines "$rel_source" "$target"; then
-            _ok "cleaned" "$target — removed omacmux source lines"
+            _ok "cleaned" "$target — removed anu source lines"
             count=$((count + 1))
           else
-            _warn "skip" "$target — no omacmux lines found"
+            _warn "skip" "$target — no anu lines found"
           fi
         fi
         ;;
@@ -478,41 +478,41 @@ _cmd_unlink() {
   done < <(_manifest_entries)
 
   # Remove source symlink
-  if [[ -L "$OMACMUX_LINK_PATH" ]]; then
-    rm "$OMACMUX_LINK_PATH"
-    _ok "removed" "~/.local/share/omacmux symlink"
+  if [[ -L "$ANU_LINK_PATH" ]]; then
+    rm "$ANU_LINK_PATH"
+    _ok "removed" "~/.local/share/anu symlink"
   fi
 
   # Clear manifest
   rm -f "$MANIFEST"
-  rmdir "$OMACMUX_STATE_DIR" 2>/dev/null || true
+  rmdir "$ANU_STATE_DIR" 2>/dev/null || true
 
   echo ""
   _info "Done — $count files unlinked/restored"
   echo ""
   _dim "Homebrew packages were NOT removed."
-  _dim "Run 'brew bundle cleanup --file=$OMACMUX_ROOT/Brewfile --force' to remove them."
+  _dim "Run 'brew bundle cleanup --file=$ANU_ROOT/Brewfile --force' to remove them."
 }
 
 # --- STATUS ---
 
 _cmd_status() {
-  _info "omacmux status"
+  _info "anu status"
   echo ""
 
   printf "    %-10s  %-50s  %s\n" "STATE" "TARGET" "STRATEGY"
   printf "    %-10s  %-50s  %s\n" "-----" "------" "--------"
 
-  for entry in "${OMACMUX_LINKS[@]}"; do
-    omacmux_parse_link "$entry"
-    local src="$OMACMUX_ROOT/$_source"
+  for entry in "${ANU_LINKS[@]}"; do
+    anu_parse_link "$entry"
+    local src="$ANU_ROOT/$_source"
     local dest="$_dest"
     local short_dest="${dest/#$HOME/~}"
     local state=""
 
     if [[ -L "$dest" ]] && [[ "$(readlink "$dest")" == "$src" ]]; then
       state="${GREEN}linked${NC}"
-    elif [[ "$_strategy" == "merge" ]] && _is_omacmux_sourced "$_source" "$dest"; then
+    elif [[ "$_strategy" == "merge" ]] && _is_anu_sourced "$_source" "$dest"; then
       state="${GREEN}merged${NC}"
     elif [[ -e "$dest" ]]; then
       state="${YELLOW}conflict${NC}"
@@ -530,17 +530,17 @@ _cmd_status() {
 # --- DOCTOR ---
 
 _cmd_doctor() {
-  _info "omacmux doctor"
+  _info "anu doctor"
   echo ""
   local issues=0
 
   # Check Homebrew
   if command -v brew &>/dev/null; then
     _ok "ok" "Homebrew installed"
-    if HOMEBREW_NO_AUTO_UPDATE=1 brew bundle check --file="$OMACMUX_ROOT/Brewfile" &>/dev/null; then
+    if HOMEBREW_NO_AUTO_UPDATE=1 brew bundle check --file="$ANU_ROOT/Brewfile" &>/dev/null; then
       _ok "ok" "all Brewfile dependencies installed"
     else
-      _err "missing" "some Brewfile dependencies — run 'omacmux init' or 'brew bundle'"
+      _err "missing" "some Brewfile dependencies — run 'anu init' or 'brew bundle'"
       issues=$((issues + 1))
     fi
   else
@@ -561,13 +561,13 @@ _cmd_doctor() {
   if [[ "${SHELL:-}" == "$BREW_BASH" ]]; then
     _ok "ok" "default shell is Homebrew bash"
   else
-    _warn "info" "default shell is $SHELL (omacmux prefers $BREW_BASH)"
+    _warn "info" "default shell is $SHELL (anu prefers $BREW_BASH)"
   fi
 
   # Check symlinks
   local broken=0
-  for entry in "${OMACMUX_LINKS[@]}"; do
-    omacmux_parse_link "$entry"
+  for entry in "${ANU_LINKS[@]}"; do
+    anu_parse_link "$entry"
     local dest="$_dest"
     if [[ -L "$dest" ]] && [[ ! -e "$dest" ]]; then
       _err "broken" "$dest -> $(readlink "$dest")"
@@ -581,16 +581,16 @@ _cmd_doctor() {
   fi
 
   # Check source link
-  if [[ -L "$OMACMUX_LINK_PATH" && "$(readlink "$OMACMUX_LINK_PATH")" == "$OMACMUX_ROOT" ]]; then
-    _ok "ok" "source link (~/.local/share/omacmux)"
-  elif [[ -L "$OMACMUX_LINK_PATH" ]]; then
-    _warn "warn" "~/.local/share/omacmux points to $(readlink "$OMACMUX_LINK_PATH")"
+  if [[ -L "$ANU_LINK_PATH" && "$(readlink "$ANU_LINK_PATH")" == "$ANU_ROOT" ]]; then
+    _ok "ok" "source link (~/.local/share/anu)"
+  elif [[ -L "$ANU_LINK_PATH" ]]; then
+    _warn "warn" "~/.local/share/anu points to $(readlink "$ANU_LINK_PATH")"
     issues=$((issues + 1))
-  elif [[ -e "$OMACMUX_LINK_PATH" ]]; then
-    _warn "warn" "~/.local/share/omacmux exists but is not a symlink"
+  elif [[ -e "$ANU_LINK_PATH" ]]; then
+    _warn "warn" "~/.local/share/anu exists but is not a symlink"
     issues=$((issues + 1))
   else
-    _warn "missing" "source link — run 'omacmux init'"
+    _warn "missing" "source link — run 'anu init'"
     issues=$((issues + 1))
   fi
 
@@ -599,7 +599,7 @@ _cmd_doctor() {
     local link_count; link_count=$(awk 'NF && $0 !~ /^#/ { count++ } END { print count + 0 }' "$MANIFEST" 2>/dev/null || echo "0")
     _ok "ok" "manifest ($link_count entries at $MANIFEST)"
   else
-    _warn "missing" "manifest — run 'omacmux init'"
+    _warn "missing" "manifest — run 'anu init'"
     issues=$((issues + 1))
   fi
 
@@ -614,21 +614,21 @@ _cmd_doctor() {
 # --- UPGRADE ---
 
 _cmd_upgrade() {
-  _info "omacmux upgrade"
+  _info "anu upgrade"
   echo ""
 
   # Pull latest
   _info "Pulling latest changes..."
-  local before; before=$(git -C "$OMACMUX_ROOT" rev-parse HEAD 2>/dev/null || echo "")
+  local before; before=$(git -C "$ANU_ROOT" rev-parse HEAD 2>/dev/null || echo "")
   local pull_ok=1
-  git -C "$OMACMUX_ROOT" pull --rebase 2>/dev/null && pull_ok=0 || {
+  git -C "$ANU_ROOT" pull --rebase 2>/dev/null && pull_ok=0 || {
     _warn "skip" "git pull failed (not a git repo or no remote)"
   }
-  local after; after=$(git -C "$OMACMUX_ROOT" rev-parse HEAD 2>/dev/null || echo "")
+  local after; after=$(git -C "$ANU_ROOT" rev-parse HEAD 2>/dev/null || echo "")
 
   if [[ $pull_ok -eq 0 && -n "$before" && "$before" != "$after" ]]; then
     _ok "updated" "${before:0:7} -> ${after:0:7}"
-    git -C "$OMACMUX_ROOT" log --oneline "${before}..${after}" | sed 's/^/    /'
+    git -C "$ANU_ROOT" log --oneline "${before}..${after}" | sed 's/^/    /'
   elif [[ $pull_ok -eq 0 ]]; then
     _ok "ok" "already up to date"
   fi
@@ -637,20 +637,20 @@ _cmd_upgrade() {
   # Sync deps
   if command -v brew &>/dev/null; then
     _info "Syncing Homebrew dependencies..."
-    HOMEBREW_NO_AUTO_UPDATE=1 brew bundle --file="$OMACMUX_ROOT/Brewfile" 2>/dev/null
+    HOMEBREW_NO_AUTO_UPDATE=1 brew bundle --file="$ANU_ROOT/Brewfile" 2>/dev/null
     _ok "ok" "dependencies synced"
     echo ""
   fi
 
   # Re-run init in non-interactive mode for new links
   _info "Syncing config links..."
-  source "$OMACMUX_ROOT/links.sh"
+  source "$ANU_ROOT/links.sh"
   _manifest_init
   _ensure_repo_link
 
-  for entry in "${OMACMUX_LINKS[@]}"; do
-    omacmux_parse_link "$entry"
-    local src="$OMACMUX_ROOT/$_source"
+  for entry in "${ANU_LINKS[@]}"; do
+    anu_parse_link "$entry"
+    local src="$ANU_ROOT/$_source"
     local dest="$_dest"
 
     [[ ! -e "$src" ]] && continue
@@ -660,7 +660,7 @@ _cmd_upgrade() {
       _manifest_add "$_strategy" "$src" "$dest" ""
       continue
     fi
-    if [[ "$_strategy" == "merge" ]] && _is_omacmux_sourced "$_source" "$dest"; then
+    if [[ "$_strategy" == "merge" ]] && _is_anu_sourced "$_source" "$dest"; then
       _manifest_add "merge" "$src" "$dest" ""
       continue
     fi
@@ -681,7 +681,7 @@ _cmd_upgrade() {
 
     # Existing conflict — don't touch during upgrade, just report
     if [[ -e "$dest" ]]; then
-      _warn "conflict" "$dest — run 'omacmux init' to resolve"
+      _warn "conflict" "$dest — run 'anu init' to resolve"
     fi
   done
 
@@ -693,14 +693,14 @@ _cmd_upgrade() {
 
 _cmd_help() {
   cat <<EOF
-${BOLD}omacmux${NC} — agent-first IDE for macOS
+${BOLD}anu${NC} — agent-first IDE for macOS
 
 ${BOLD}Usage:${NC}
-  omacmux <command> [options]
+  anu <command> [options]
 
 ${BOLD}Commands:${NC}
   init        Set up config files (interactive conflict resolution)
-  unlink      Remove all omacmux configs, restore backups
+  unlink      Remove all anu configs, restore backups
   status      Show current state of all config links
   upgrade     Pull latest + sync dependencies + update links
   doctor      Check installation health
@@ -712,12 +712,12 @@ ${BOLD}Init options:${NC}
   --skip-existing   Non-interactive: skip any file that already exists
 
 ${BOLD}Install via Homebrew:${NC}
-  brew install aadarwal/tap/omacmux
-  omacmux init
+  brew install aadarwal/tap/anu
+  anu init
 
 ${BOLD}Install via git clone:${NC}
-  git clone https://github.com/aadarwal/omacmux.git ~/omacmux
-  ~/omacmux/bin/omacmux init
+  git clone https://github.com/aadarwal/anu.git ~/anu
+  ~/anu/bin/anu init
 EOF
 }
 

@@ -7,14 +7,14 @@
 # and swarm topology guidance.
 #
 # Usage:
-#   omacmux_init              # generate AGENTS.md for current repo
-#   omacmux_init --force      # regenerate even if AGENTS.md exists
+#   anu_init              # generate AGENTS.md for current repo
+#   anu_init --force      # regenerate even if AGENTS.md exists
 
 # ------------------------------------------------------------------------------
 # Constants & stub guards
 # ------------------------------------------------------------------------------
 
-_init_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omacmux/init"
+_init_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/anu/init"
 command -v _voice_say &>/dev/null || _voice_say() { :; }
 command -v _voice_sound &>/dev/null || _voice_sound() { :; }
 
@@ -117,7 +117,7 @@ $profile" 2>/dev/null)
 # Main command
 # ------------------------------------------------------------------------------
 
-omacmux_init() {
+anu_init() {
   git rev-parse --is-inside-work-tree &>/dev/null || {
     echo "init: not a git repo" >&2
     return 1

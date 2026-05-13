@@ -24,7 +24,7 @@ command -v _voice_say &>/dev/null || _voice_say() { :; }
 # Internal helpers
 # ------------------------------------------------------------------------------
 
-_meshsync_state_dir="$HOME/.local/share/omacmux/meshsync"
+_meshsync_state_dir="$HOME/.local/share/anu/meshsync"
 
 _meshsync_guard() {
   command -v rsync &>/dev/null || {
@@ -73,7 +73,7 @@ _meshsync_on() {
     return 1
   }
 
-  local swarm_state_dir="$HOME/.local/share/omacmux/swarms/$swarm_id"
+  local swarm_state_dir="$HOME/.local/share/anu/swarms/$swarm_id"
   [[ -d "$swarm_state_dir" ]] || {
     echo -e "\033[31mSwarm state dir not found: $swarm_state_dir\033[0m"
     return 1

@@ -1,4 +1,4 @@
-# omacmux — Engine + Flavors Plan
+# anu — Engine + Flavors Plan
 
 > Where this project is going, and why. Read top-to-bottom. Each phase is
 > independently shippable; stop at any phase if priorities shift.
@@ -7,12 +7,12 @@
 
 ## 1. Thesis
 
-omacmux is **an agent-first IDE built on tmux**. Today it's labeled
+anu is **an agent-first IDE built on tmux**. Today it's labeled
 "macOS-only" because the install path uses Homebrew, the terminal is Ghostty,
 and voice/sounds/clipboard call macOS-specific binaries (`say`, `afplay`,
 `pbcopy`, `osascript`).
 
-But the *thing that makes omacmux interesting* — the swarm system, the layouts,
+But the *thing that makes anu interesting* — the swarm system, the layouts,
 the worktrees, the review system, the agent
 communication — is pure bash + tmux + jq + fzf + git. None of it knows or
 cares that it's running on macOS.
@@ -47,8 +47,8 @@ because:
 | Adding a new platform | Audit every shim function | Drop in `flavors/<new>/` |
 | Engine ships alone | No (entangled with flavor code) | Yes — independent artifact |
 | Drift on unused platforms | Silent | Visible — flavor either loads or doesn't |
-| Distribution | One package, runtime dispatch | `brew install omacmux` and `pacman -S omacmux-arch` are separate |
-| Mental model | "omacmux works on Linux too" | "omacmux-engine is the thesis. Pick a flavor." |
+| Distribution | One package, runtime dispatch | `brew install anu` and `pacman -S anu-arch` are separate |
+| Mental model | "anu works on Linux too" | "anu-engine is the thesis. Pick a flavor." |
 | Forks | Fork the whole repo | Write a 30-line `flavors/<myflavor>/` |
 
 Engine + flavors is just *the universal approach taken seriously*. The shim
@@ -73,7 +73,7 @@ The 45 platform-touching lines live in 6 surfaces:
 | Sound effects | `afplay /System/Library/Sounds/*.aiff` | `fns/voice:36-45`, `fns/sounds:31` | 10 |
 | Clipboard | `pbcopy` | `config/tmux/tmux.conf:11`, `fns/git:49`, `fns/utils:70` | 3 |
 | Notifications | `osascript -e 'display notification ...'` | `config/claude/notify.sh` | 2 |
-| Installer / shell | `brew bundle`, `/opt/homebrew/bin/bash` | `bin/omacmux:19,100-115,470-565`, `Brewfile`, `install.sh:13-16` | ~25 |
+| Installer / shell | `brew bundle`, `/opt/homebrew/bin/bash` | `bin/anu:19,100-115,470-565`, `Brewfile`, `install.sh:13-16` | ~25 |
 | Ghostty Mac keys | `macos-option-as-alt`, `macos-titlebar-style`, `window-save-state` | `config/ghostty/config:21-23` | 3 |
 
 Everything else is engine. Tally of what's already universal:
@@ -99,7 +99,7 @@ these verbs, defined by whichever flavor is loaded at boot:
 | Verb | Purpose | macOS impl | Linux impl |
 |---|---|---|---|
 | `_say "<text>"` | TTS, fire-and-forget | `say -r 200 "$*" &` | `piper`, `espeak-ng`, or `spd-say` (or no-op if none) |
-| `_sound <event>` | Play a named sound (`done`, `error`, `start`, `tick`, `warning`, `finish`) | `afplay /System/Library/Sounds/<map>.aiff` | `paplay $OMACMUX_PATH/flavors/linux/sounds/<event>.wav` |
+| `_sound <event>` | Play a named sound (`done`, `error`, `start`, `tick`, `warning`, `finish`) | `afplay /System/Library/Sounds/<map>.aiff` | `paplay $ANU_PATH/flavors/linux/sounds/<event>.wav` |
 | `_clip` | Read stdin into clipboard | `pbcopy` | `wl-copy` ‖ `xclip -sel clip` ‖ OSC52 fallback |
 | `_paste` | Write clipboard to stdout | `pbpaste` | `wl-paste` ‖ `xclip -o` |
 | `_notify "<title>" "<body>"` | Desktop notification | `osascript -e 'display notification ...'` | `notify-send` |
@@ -119,7 +119,7 @@ has to check.
 ## 5. Target layout
 
 ```
-omacmux/
+anu/
 ├── PLAN.md                          # this file
 ├── README.md                        # rewritten — engine first, flavors below
 │
@@ -132,13 +132,13 @@ omacmux/
 │   │   │   ├── init
 │   │   │   ├── shell
 │   │   │   ├── inputrc
-│   │   │   └── platform.sh          # source flavors/$OMACMUX_FLAVOR/platform.sh
+│   │   │   └── platform.sh          # source flavors/$ANU_FLAVOR/platform.sh
 │   │   ├── tmux/                    # tmux.conf, pane-swap.sh, tile.sh, session-bar.sh
 │   │   ├── nvim/                    # LazyVim
 │   │   ├── starship.toml
 │   │   ├── git/config
 │   │   ├── claude/settings.json     # notify.sh moves to flavor
-│   ├── bin/omacmux                  # CLI; installer logic factored into _flavor_install
+│   ├── bin/anu                  # CLI; installer logic factored into _flavor_install
 │   ├── shell/bashrc                 # sources engine + selected flavor
 │   ├── shell/bash_profile
 │   ├── links.sh                     # link manifest, flavor-aware
@@ -176,13 +176,13 @@ Selection at boot:
 
 ```bash
 # engine/config/bash/platform.sh
-: "${OMACMUX_FLAVOR:=$(cat "$OMACMUX_STATE/flavor" 2>/dev/null || \
+: "${ANU_FLAVOR:=$(cat "$ANU_STATE/flavor" 2>/dev/null || \
   case "$(uname -s)" in Darwin) echo darwin ;; Linux) echo arch ;; esac)}"
-source "$OMACMUX_PATH/flavors/$OMACMUX_FLAVOR/platform.sh"
+source "$ANU_PATH/flavors/$ANU_FLAVOR/platform.sh"
 ```
 
-`omacmux init` writes `$OMACMUX_STATE/flavor` so the choice is sticky and
-overridable (`OMACMUX_FLAVOR=headless ssh remote-host` Just Works).
+`anu init` writes `$ANU_STATE/flavor` so the choice is sticky and
+overridable (`ANU_FLAVOR=headless ssh remote-host` Just Works).
 
 ---
 
@@ -232,7 +232,7 @@ returns hits *only* in `config/bash/platforms/darwin.sh`.
 
 1. `config/bash/platforms/linux.sh` implementing all 8 verbs:
    - `_say`: `command -v piper && piper --voice ... <<< "$*"` ‖ `espeak-ng` ‖ no-op
-   - `_sound`: `paplay "$OMACMUX_PATH/.../sounds/$1.wav"`
+   - `_sound`: `paplay "$ANU_PATH/.../sounds/$1.wav"`
    - `_clip`: `wl-copy` ‖ `xclip -sel clip` ‖ OSC52 via `tmux load-buffer`
    - `_paste`: mirror
    - `_notify`: `notify-send "$1" "$2"`
@@ -241,13 +241,13 @@ returns hits *only* in `config/bash/platforms/darwin.sh`.
    - `_default_shell`: no-op
 2. Bundle royalty-free `.wav` files for the 6 sound events (or generate
    tones with `sox`).
-3. `bin/omacmux`: replace the macOS guard and the
+3. `bin/anu`: replace the macOS guard and the
    `HOMEBREW_NO_AUTO_UPDATE=1 brew bundle` block with `_pkg_install` driven by
    a `packages.toml` that maps `Brewfile` entries to per-distro names.
 4. `install.sh`: drop the `[[ "$(uname)" != "Darwin" ]] && exit 1` and
    dispatch to the right flavor installer.
 
-**Done when:** on a fresh Arch container, `git clone && ./install.sh && omacmux init`
+**Done when:** on a fresh Arch container, `git clone && ./install.sh && anu init`
 produces a working shell where `t`, `tdl cx`, `swarm start 4 cx`,
 `who`, `tell alpha "hi"`, and `recap` all work. Mac behavior unchanged.
 
@@ -267,7 +267,7 @@ This is mechanical once Phases 1–2 are clean.
 5. Update `engine/links.sh` so symlink targets are relative to whichever
    flavor is active.
 6. Update `engine/config/bash/platform.sh` to source from
-   `$OMACMUX_PATH/flavors/$OMACMUX_FLAVOR/`.
+   `$ANU_PATH/flavors/$ANU_FLAVOR/`.
 
 **Done when:** `engine/` contains zero references to specific platforms,
 `grep -r 'Darwin\|brew\|pbcopy\|afplay\|/System/Library' engine/` is empty,
@@ -279,17 +279,17 @@ and both Mac + Arch installs still work.
 
 1. **Mac:** keep the existing `aadarwal/homebrew-tap` formula. Update it to
    install `engine/` and the `darwin/` flavor.
-2. **Arch:** publish `flavors/arch/PKGBUILD` to AUR as `omacmux` (with
-   `omacmux-engine` as a dep). Tag culturally as omarchy-friendly.
-3. **Generic Linux:** `curl -fsSL omacmux.dev/install.sh | bash` that detects
+2. **Arch:** publish `flavors/arch/PKGBUILD` to AUR as `anu` (with
+   `anu-engine` as a dep). Tag culturally as omarchy-friendly.
+3. **Generic Linux:** `curl -fsSL anu.dev/install.sh | bash` that detects
    distro and pulls the right flavor.
 4. Rewrite `README.md`:
-   - Lead with "omacmux is an agent-first IDE built on tmux. Engine runs
+   - Lead with "anu is an agent-first IDE built on tmux. Engine runs
      anywhere; flavors give you the chrome."
    - Three install paths: Mac (brew), Arch (AUR), generic (curl).
    - Daily-driver section is shared. Per-flavor sections cover the chrome.
 
-**Done when:** a fresh Arch user can `pacman -S omacmux` (after AUR setup),
+**Done when:** a fresh Arch user can `pacman -S anu` (after AUR setup),
 boot tmux, and have a working swarm in under 5 minutes.
 
 ---
@@ -326,7 +326,7 @@ exit code, the contract is wrong, not the test.
 
 These are the choices that shape the contract. Pick before writing the shim:
 
-1. **Flavor selection precedence.** `OMACMUX_FLAVOR` env var → `$OMACMUX_STATE/flavor` file → uname default. Confirm this order; future-you will want override-by-env for SSH cases.
+1. **Flavor selection precedence.** `ANU_FLAVOR` env var → `$ANU_STATE/flavor` file → uname default. Confirm this order; future-you will want override-by-env for SSH cases.
 2. **Voice quality on Linux.** Default off, or default on with `espeak-ng`?
    `piper` produces near-`say` quality but is a separate install. Recommendation:
    default off; document `piper` as the "premium" install. Mac stays default-on.
@@ -353,7 +353,7 @@ Things explicitly **not** in scope, to keep the plan honest:
 - **Windows / WSL native flavor.** WSL works through the Linux flavor;
   native Windows is its own multi-month project (cmd/powershell/tmux-on-Windows
   is a different beast). Out of scope.
-- **GUI frontend.** omacmux is terminal-first. No separate GUI frontend is in
+- **GUI frontend.** anu is terminal-first. No separate GUI frontend is in
   scope.
 - **Replacing tmux.** Zellij/wezterm-multiplexer/screen are not on the
   roadmap. tmux is the engine's hard runtime dep. The contract pretends
@@ -372,8 +372,8 @@ Things explicitly **not** in scope, to keep the plan honest:
 When this plan is fully executed, a stranger reading the repo sees:
 
 ```
-$ tree -L 2 omacmux/
-omacmux/
+$ tree -L 2 anu/
+anu/
 ├── engine/             # one paragraph: "this is the agent IDE thesis"
 ├── flavors/            # one line each: "Mac chrome", "Arch chrome", ...
 ├── PLAN.md             # this file

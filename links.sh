@@ -1,4 +1,4 @@
-# Symlink manifest — sourced by bin/omacmux and legacy wrapper scripts.
+# Symlink manifest — sourced by bin/anu and legacy wrapper scripts.
 #
 # Format: "strategy:source_relative_path:destination_absolute_path"
 #
@@ -7,7 +7,7 @@
 #   replace  — full symlink: backup existing file, then symlink ours
 #   additive — targets unlikely to exist already (bins, new configs)
 
-OMACMUX_LINKS=(
+ANU_LINKS=(
   "replace:config/ghostty/config:$HOME/.config/ghostty/config"
   "replace:config/tmux/tmux.conf:$HOME/.config/tmux/tmux.conf"
   "additive:config/tmux/session-bar.sh:$HOME/.config/tmux/session-bar.sh"
@@ -23,8 +23,8 @@ OMACMUX_LINKS=(
 )
 
 # Helper: parse a link entry into its components
-# Usage: omacmux_parse_link "$entry"; echo "$_strategy $_source $_dest"
-omacmux_parse_link() {
+# Usage: anu_parse_link "$entry"; echo "$_strategy $_source $_dest"
+anu_parse_link() {
   local entry="$1"
   _strategy="${entry%%:*}"
   local rest="${entry#*:}"

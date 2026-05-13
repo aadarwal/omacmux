@@ -533,7 +533,7 @@ tml() {
 # Usage: tss [name]
 tss() {
   local save_name="${1:-default}"
-  local save_dir="$HOME/.local/share/omacmux/sessions"
+  local save_dir="$HOME/.local/share/anu/sessions"
   local save_file="$save_dir/$save_name.tsv"
 
   mkdir -p "$save_dir"
@@ -547,7 +547,7 @@ tss() {
 # Usage: tsr [name]
 tsr() {
   local save_name="${1:-default}"
-  local save_dir="$HOME/.local/share/omacmux/sessions"
+  local save_dir="$HOME/.local/share/anu/sessions"
   local save_file="$save_dir/$save_name.tsv"
 
   [[ ! -f $save_file ]] && { echo "No save file: $save_file"; return 1; }

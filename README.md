@@ -1,4 +1,4 @@
-# omacmux
+# anu
 
 An agent-first IDE built entirely in the terminal.
 
@@ -20,18 +20,18 @@ Everything is a shell function. Everything is composable. Everything is yours to
 ### Option A: Homebrew (recommended)
 
 ```bash
-brew install aadarwal/tap/omacmux
-omacmux init
+brew install aadarwal/tap/anu
+anu init
 ```
 
 ### Option B: Git clone
 
 ```bash
-git clone https://github.com/aadarwal/omacmux.git ~/omacmux
-~/omacmux/bin/omacmux init
+git clone https://github.com/aadarwal/anu.git ~/anu
+~/anu/bin/anu init
 ```
 
-`omacmux init` installs dependencies, then walks you through each config file — merge with your existing setup, replace (with backup), or skip. For a fresh machine, use `omacmux init --replace-all`.
+`anu init` installs dependencies, then walks you through each config file — merge with your existing setup, replace (with backup), or skip. For a fresh machine, use `anu init --replace-all`.
 
 Open a **new Ghostty window**, then:
 
@@ -67,7 +67,7 @@ vibe stop      # tear it all down
 
 ## Layouts
 
-All layout commands run inside tmux. This is the core of omacmux — arranging agents and editors in space.
+All layout commands run inside tmux. This is the core of anu — arranging agents and editors in space.
 
 ### `tdl` — Dev Layout
 
@@ -225,7 +225,7 @@ When a swarm finishes, you don't want to read 200 raw diffs. The review system s
 
 ## Voice Mode
 
-omacmux is designed to be driven by voice via [Wispr Flow](https://wispr.ai) or any voice-to-text tool. Voice mode adds TTS feedback and sound effects so you know what's happening without staring at the terminal.
+anu is designed to be driven by voice via [Wispr Flow](https://wispr.ai) or any voice-to-text tool. Voice mode adds TTS feedback and sound effects so you know what's happening without staring at the terminal.
 
 ### Toggle
 
@@ -477,30 +477,30 @@ Connect to remote devices for distributed agent swarms.
 
 ## Install / Upgrade / Uninstall
 
-### The `omacmux` CLI
+### The `anu` CLI
 
 | Command | Description |
 |---------|-------------|
-| `omacmux init` | Interactive setup — deps, config linking, git identity |
-| `omacmux init --replace-all` | Non-interactive: replace all configs (fresh machine) |
-| `omacmux init --merge-all` | Non-interactive: merge shell files, replace the rest |
-| `omacmux init --skip-existing` | Non-interactive: skip any existing config file |
-| `omacmux unlink` | Remove all omacmux configs, restore backups |
-| `omacmux status` | Show current state of all config links |
-| `omacmux upgrade` | Pull latest + sync deps + update links |
-| `omacmux doctor` | Check installation health |
+| `anu init` | Interactive setup — deps, config linking, git identity |
+| `anu init --replace-all` | Non-interactive: replace all configs (fresh machine) |
+| `anu init --merge-all` | Non-interactive: merge shell files, replace the rest |
+| `anu init --skip-existing` | Non-interactive: skip any existing config file |
+| `anu unlink` | Remove all anu configs, restore backups |
+| `anu status` | Show current state of all config links |
+| `anu upgrade` | Pull latest + sync deps + update links |
+| `anu doctor` | Check installation health |
 
 ### Config conflict resolution
 
-When `omacmux init` finds an existing config file, it offers three strategies:
+When `anu init` finds an existing config file, it offers three strategies:
 
-- **Merge** (shell files like `~/.bashrc`): appends a `source omacmux` line to your existing file. Your config stays intact.
-- **Replace**: backs up your file (e.g., `~/.bashrc.omacmux-bak.20260408_143022`), then symlinks ours. `omacmux unlink` restores the backup.
+- **Merge** (shell files like `~/.bashrc`): appends a `source anu` line to your existing file. Your config stays intact.
+- **Replace**: backs up your file (e.g., `~/.bashrc.anu-bak.20260408_143022`), then symlinks ours. `anu unlink` restores the backup.
 - **Skip**: leaves the file untouched.
 
 ### Legacy scripts
 
-`./install.sh`, `./upgrade.sh`, and `./uninstall.sh` still work — they delegate to `omacmux init/upgrade/unlink`.
+`./install.sh`, `./upgrade.sh`, and `./uninstall.sh` still work — they delegate to `anu init/upgrade/unlink`.
 
 ### What gets installed
 
@@ -510,13 +510,13 @@ When `omacmux init` finds an existing config file, it offers three strategies:
 
 ### What gets linked
 
-All config files are linked from the repo to their standard locations (`~/.config/tmux/`, `~/.config/nvim/`, `~/.config/ghostty/`, `~/.bashrc`, etc.). Run `omacmux status` to see the full list and current state.
+All config files are linked from the repo to their standard locations (`~/.config/tmux/`, `~/.config/nvim/`, `~/.config/ghostty/`, `~/.bashrc`, etc.). Run `anu status` to see the full list and current state.
 
 ---
 
 ## State & Data
 
-omacmux exposes the repo at `~/.local/share/omacmux/` and stores runtime feature state under that path:
+anu exposes the repo at `~/.local/share/anu/` and stores runtime feature state under that path:
 
 | Directory | Contents |
 |-----------|----------|
@@ -526,7 +526,7 @@ omacmux exposes the repo at `~/.local/share/omacmux/` and stores runtime feature
 | `agentnames/` | Custom agent nicknames |
 | `mesh/` | Tailscale device cache, host definitions |
 
-The installer link manifest lives separately at `~/.local/state/omacmux/manifest` so `omacmux unlink` can restore configs without writing installer bookkeeping into the repo.
+The installer link manifest lives separately at `~/.local/state/anu/manifest` so `anu unlink` can restore configs without writing installer bookkeeping into the repo.
 
 ---
 
@@ -542,4 +542,4 @@ The installer link manifest lives separately at `~/.local/state/omacmux/manifest
 
 ## Credits
 
-The DHH quote is from his work on [omakub](https://omakub.org) / [omarchy](https://github.com/basecamp/omarchy), which inspired the original direction. omacmux has since diverged into something different — an agent-first research environment rather than a general-purpose dev setup.
+The DHH quote is from his work on [omakub](https://omakub.org) / [omarchy](https://github.com/basecamp/omarchy), which inspired the original direction. anu has since diverged into something different — an agent-first research environment rather than a general-purpose dev setup.

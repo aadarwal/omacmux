@@ -13,7 +13,7 @@
 
 # Stub guards
 command -v _swarm_current_id &>/dev/null || _swarm_current_id() { return 1; }
-command -v _swarm_state_dir &>/dev/null || _swarm_state_dir() { echo "$HOME/.local/share/omacmux/swarms"; }
+command -v _swarm_state_dir &>/dev/null || _swarm_state_dir() { echo "$HOME/.local/share/anu/swarms"; }
 command -v _an_resolve &>/dev/null || _an_resolve() { echo "$1"; }
 command -v _an_display_name &>/dev/null || _an_display_name() { echo "$1"; }
 command -v _voice_say &>/dev/null || _voice_say() { :; }

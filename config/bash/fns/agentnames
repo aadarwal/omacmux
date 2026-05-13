@@ -22,7 +22,7 @@ command -v _voice_enabled &>/dev/null || _voice_enabled() { return 1; }
 
 declare -a _AN_NATO=(alpha bravo charlie delta echo foxtrot golf hotel india juliet)
 
-_an_state_dir="$HOME/.local/share/omacmux/agentnames"
+_an_state_dir="$HOME/.local/share/anu/agentnames"
 
 # ANSI colors
 _an_green='\033[32m'
