@@ -13,7 +13,7 @@ and voice/sounds/clipboard call macOS-specific binaries (`say`, `afplay`,
 `pbcopy`, `osascript`).
 
 But the *thing that makes omacmux interesting* — the swarm system, the layouts,
-the worktrees, the scans, the review system, the agent
+the worktrees, the review system, the agent
 communication — is pure bash + tmux + jq + fzf + git. None of it knows or
 cares that it's running on macOS.
 
@@ -84,8 +84,7 @@ Everything else is engine. Tally of what's already universal:
   messaging, capture, collect, hub. Bash + tmux + jq + fzf.
 - **Mesh/distributed** (`fns/mesh`, 1399 lines): runs over `tailscale ssh`.
   Already heterogeneous; Mac↔Linux works today at `fns/swarm:253` and `:1522`.
-- **Scans** (847+), **takeover** (633), **review** (472), and
-  **worktrees** (308): all pure bash + git + jq.
+- **Review** (472) and **worktrees** (308): pure bash + git + jq.
 - **tmux.conf** (183 lines): one `pbcopy` line is the only OS-ism.
 - **Neovim/LazyVim, starship, fzf, zoxide, eza, bat, ripgrep, fd, mise, gh,
   jq**: every dep in `Brewfile` is first-class on Linux.

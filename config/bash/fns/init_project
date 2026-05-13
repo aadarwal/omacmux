@@ -3,8 +3,8 @@
 # ==============================================================================
 #
 # Profiles the current repo, sends the profile to Claude for analysis, and
-# generates an AGENTS.md file with architecture summary, recommended scan
-# modes, suggested workflows, and swarm topology guidance.
+# generates an AGENTS.md file with architecture summary, suggested workflows,
+# and swarm topology guidance.
 #
 # Usage:
 #   omacmux_init              # generate AGENTS.md for current repo
@@ -14,10 +14,9 @@
 # Constants & stub guards
 # ------------------------------------------------------------------------------
 
-_init_state_dir="$HOME/.local/share/omacmux/init"
+_init_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omacmux/init"
 command -v _voice_say &>/dev/null || _voice_say() { :; }
 command -v _voice_sound &>/dev/null || _voice_sound() { :; }
-command -v _scan_state_dir &>/dev/null || _scan_state_dir() { return 1; }
 
 # ------------------------------------------------------------------------------
 # Internal helpers
@@ -86,19 +85,11 @@ Given this codebase profile, generate an AGENTS.md file with the following secti
 
 1. **Architecture Summary** — A concise overview of the repo structure, primary languages, and key components.
 
-2. **Recommended Scan Modes** — Which of these scan modes are most useful for this codebase and why:
-   - explore (architecture & design)
-   - audit (security & quality)
-   - research (deep patterns)
-   - review (code review)
-   - test (test coverage)
+2. **Suggested Workflows** — Recommend direct commands for useful first passes:
+   - \`swarm star <n> cxx\` — what multi-agent analysis would be worth launching
+   - \`swarm wt <n> cxx\` — what parallel implementation work would benefit from worktree isolation
 
-3. **Suggested Workflows** — Recommend direct commands for useful first passes:
-   - \`scan explore\` — what architectural questions to investigate
-   - \`scan audit\` — what quality or security risks to inspect
-   - \`swarm star <n> cxx\` or \`swarm wt <n> cxx\` — what multi-agent work would be worth launching
-
-4. **Swarm Topology Guide** — Recommend the best swarm topology for common tasks:
+3. **Swarm Topology Guide** — Recommend the best swarm topology for common tasks:
    - \`swarm star <n> cxx\` — when and with how many agents
    - \`swarm wt <n> cxx\` — when worktree isolation helps
    - \`swarm pipe <n> cxx [--gated]\` — when pipeline stages make sense, and when to add human approval gates
@@ -107,7 +98,7 @@ Given this codebase profile, generate an AGENTS.md file with the following secti
 
    The last argument selects the agent harness. Available: \`cxx\` (Claude Code YOLO), \`cdxx\` (Codex full-auto), \`pi\` (Pi minimal harness, no permission popups). Mix harnesses across topologies when their strengths fit (e.g. Pi for quick edits, Claude for deep reasoning).
 
-5. **Quick Start** — 3-5 commands to run first after cloning this repo.
+4. **Quick Start** — 3-5 commands to run first after cloning this repo.
 
 Output raw markdown only. No code fences around the whole document.
 
@@ -154,26 +145,11 @@ omacmux_init() {
   local profile_path="$_init_state_dir/profile.md"
 
   echo -e "\033[36minit:\033[0m profiling repository..."
-  if declare -f _scan_profile &>/dev/null; then
-    _scan_profile
-    local scan_state_dir
-    scan_state_dir=$(_scan_state_dir 2>/dev/null)
-    if [[ -f "$scan_state_dir/profile.md" ]]; then
-      cp "$scan_state_dir/profile.md" "$profile_path"
-    else
-      _init_profile_repo "$profile_path" || {
-        echo "init: failed to profile repo" >&2
-        _voice_sound error
-        return 1
-      }
-    fi
-  else
-    _init_profile_repo "$profile_path" || {
-      echo "init: failed to profile repo" >&2
-      _voice_sound error
-      return 1
-    }
-  fi
+  _init_profile_repo "$profile_path" || {
+    echo "init: failed to profile repo" >&2
+    _voice_sound error
+    return 1
+  }
 
   _voice_say "Profile complete, generating recommendations"
 

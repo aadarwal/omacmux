@@ -30,8 +30,6 @@
       "Bash(awk *)",
       "Bash(sed *)",
       "Bash(tmux *)",
-      "Bash(scan *)",
-      "Bash(scanreport *)",
       "Bash(swarm *)",
       "Bash(swarmx *)",
       "Bash(review *)",
