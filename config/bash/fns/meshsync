@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # Keeps swarm state directories in sync across mesh devices using rsync over
-# Tailscale SSH. Follows the same daemon pattern as autocommit.
+# Tailscale SSH. Tracks daemon state with per-repo PID files.
 #
 # Usage:
 #   meshsync on [--interval <secs>] [--devices <dev1,dev2,...>]

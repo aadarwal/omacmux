@@ -44,7 +44,7 @@ Or go straight to voice-driven agent work:
 
 ```bash
 voice on       # enable audio feedback
-vibe           # launch 4 agents + auto-commit in one word
+vibe           # launch 4 agents in one word
 check          # "4 agents active, 12 files changed"
 recap          # AI summary of what changed
 vibe stop      # tear it all down
@@ -204,7 +204,7 @@ The swarm system lets you orchestrate multiple AI agents across different topolo
 | `al [cmd]` | Launch agent in a new split pane (fzf picker) |
 | `alw [cmd]` | Launch agent in a new window |
 
-Available agent aliases: `cx` (Claude), `cxx` (Claude full-auto), `c` (OpenCode), `cdx` (Codex), `cdxx` (Codex full-auto).
+Available agent aliases: `cx` (Claude), `cxx` (Claude full-auto), `c` (OpenCode), `cdx` (Codex), `cdxx` (Codex full-auto), `pi` (Pi minimal harness — no permission popups by design).
 
 ---
 
@@ -241,8 +241,8 @@ These are the commands you'd speak. Short, unambiguous, composable.
 
 | Command | Description |
 |---------|-------------|
-| `vibe [n]` | Launch N agents (default 4) + auto-commit. One word to start working. |
-| `vibe stop` | Kill swarm + stop auto-commit |
+| `vibe [n]` | Launch N agents (default 4). One word to start working. |
+| `vibe stop` | Kill swarm |
 | `check` | Spoken status: "3 agents active, 47 files changed" |
 | `ship [branch]` | Push branch, report PR URL |
 | `focus <name>` | Switch to an agent's pane |
@@ -272,43 +272,6 @@ When voice mode is on:
 - **Notifications** from Claude Code are spoken aloud
 - **Sound effects** play for swarm events (start, done, error)
 - All commands announce what they're doing
-
----
-
-## Recipes
-
-Pre-built swarm configurations for common workflows. Speak a recipe name and agents spin up.
-
-| Command | Description |
-|---------|-------------|
-| `recipe research <topic>` | 4 agents, star topology — deep-dive a topic |
-| `recipe build <feature>` | 3 agents, worktree topology — build in parallel branches |
-| `recipe fix <issue>` | 2 agents, pair topology — debug together |
-| `recipe review` | Launch the review dashboard |
-
-### Custom Recipes
-
-| Command | Description |
-|---------|-------------|
-| `recipe list` | Show built-in and user recipes |
-| `recipe save <name>` | Save current swarm config as a recipe |
-| `recipe edit <name>` | Edit a user recipe |
-| `recipe delete <name>` | Delete a user recipe |
-
----
-
-## Auto-Commit
-
-Toggle periodic background commits for "vibe mode" — when you want agents working fast without manual git management.
-
-| Command | Description |
-|---------|-------------|
-| `acm on [seconds]` | Start auto-committing (default: every 5 min) |
-| `acm off` | Stop |
-| `acm status` | Show state, PID, last commit time |
-| `acm log` | Show recent auto-commits (tagged `[auto]`) |
-
----
 
 ## Project Dashboard
 
@@ -499,6 +462,7 @@ Connect to remote devices for distributed agent swarms.
 | `c` | OpenCode |
 | `cdx` | Codex |
 | `cdxx` | Codex (full auto) |
+| `pi` | Pi coding harness (minimal, no permission popups) |
 | `n` | Neovim |
 | `g` | git |
 | `d` | docker |
@@ -552,17 +516,17 @@ All config files are linked from the repo to their standard locations (`~/.confi
 
 ## State & Data
 
-omacmux stores runtime state in `~/.local/share/omacmux/`:
+omacmux exposes the repo at `~/.local/share/omacmux/` and stores runtime feature state under that path:
 
 | Directory | Contents |
 |-----------|----------|
 | `swarms/` | Swarm metadata, agent state, mailboxes |
 | `reviews/` | Cached AI summaries per commit SHA |
-| `autocommit/` | PID files, auto-commit state |
 | `voice/` | Voice mode toggle state |
-| `recipes/` | User-saved swarm recipes |
 | `agentnames/` | Custom agent nicknames |
 | `mesh/` | Tailscale device cache, host definitions |
+
+The installer link manifest lives separately at `~/.local/state/omacmux/manifest` so `omacmux unlink` can restore configs without writing installer bookkeeping into the repo.
 
 ---
 

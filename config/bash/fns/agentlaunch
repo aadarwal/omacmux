@@ -11,6 +11,7 @@ claude	claude	Claude (default, interactive permissions)
 c	opencode	OpenCode
 cdx	codex	Codex
 cdxx	codex --full-auto	Codex (full auto)
+pi	pi	Pi (minimal coding harness, no permission popups)
 EOF
 }
 

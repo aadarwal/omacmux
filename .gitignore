@@ -1,0 +1,9 @@
+# Runtime state created during local use.
+/swarms/
+/recipes/
+
+# Removed local dashboard feature; keep accidental generated copies out.
+/remote/
+
+# Local Claude agent worktrees.
+/.claude/worktrees/

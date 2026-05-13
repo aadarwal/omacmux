@@ -44,9 +44,7 @@
       "Bash(who *)",
       "Bash(focus *)",
       "Bash(name *)",
-      "Bash(recipe *)",
       "Bash(voice *)",
-      "Bash(acm *)",
       "Bash(taa *)",
       "Bash(tra *)",
       "Bash(tscale *)",
@@ -57,7 +55,6 @@
       "Bash(pds *)",
       "Bash(cfgmap *)",
       "Bash(cfgedit *)",
-      "Bash(map *)",
       "Bash(source *)",
       "Read"
     ]

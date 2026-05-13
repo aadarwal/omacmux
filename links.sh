@@ -1,5 +1,4 @@
-# Symlink manifest — sourced by install.sh, uninstall.sh, upgrade.sh, bin/omacmux
-# REPO_DIR must be set before sourcing this file.
+# Symlink manifest — sourced by bin/omacmux and legacy wrapper scripts.
 #
 # Format: "strategy:source_relative_path:destination_absolute_path"
 #

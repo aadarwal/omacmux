@@ -4,7 +4,7 @@
 #
 # Profiles the current repo, sends the profile to Claude for analysis, and
 # generates an AGENTS.md file with architecture summary, recommended scan
-# modes, suggested recipes, and swarm topology guidance.
+# modes, suggested workflows, and swarm topology guidance.
 #
 # Usage:
 #   omacmux_init              # generate AGENTS.md for current repo
@@ -93,10 +93,10 @@ Given this codebase profile, generate an AGENTS.md file with the following secti
    - review (code review)
    - test (test coverage)
 
-3. **Suggested Recipes** — Recommend specific recipe invocations:
-   - \`recipe research \"<topic>\"\` — what topics to research
-   - \`recipe build \"<feature>\"\` — what features to build
-   - \`recipe fix \"<issue>\"\` — what issues to fix
+3. **Suggested Workflows** — Recommend direct commands for useful first passes:
+   - \`scan explore\` — what architectural questions to investigate
+   - \`scan audit\` — what quality or security risks to inspect
+   - \`swarm star <n> cxx\` or \`swarm wt <n> cxx\` — what multi-agent work would be worth launching
 
 4. **Swarm Topology Guide** — Recommend the best swarm topology for common tasks:
    - \`swarm star <n> cxx\` — when and with how many agents
@@ -104,6 +104,8 @@ Given this codebase profile, generate an AGENTS.md file with the following secti
    - \`swarm pipe <n> cxx [--gated]\` — when pipeline stages make sense, and when to add human approval gates
    - \`swarm pair cxx\` — when pair review is best
    - \`swarm tournament <n> cxx \"<task>\" --rounds <r> --eval \"<criteria>\"\` — when to use competitive multi-agent tournaments (e.g. multiple approaches to the same problem, choosing the best implementation). Suggest specific tasks and evaluation criteria relevant to this codebase.
+
+   The last argument selects the agent harness. Available: \`cxx\` (Claude Code YOLO), \`cdxx\` (Codex full-auto), \`pi\` (Pi minimal harness, no permission popups). Mix harnesses across topologies when their strengths fit (e.g. Pi for quick edits, Claude for deep reasoning).
 
 5. **Quick Start** — 3-5 commands to run first after cloning this repo.
 

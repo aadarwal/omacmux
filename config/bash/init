@@ -2,6 +2,8 @@ if command -v mise &> /dev/null; then
   eval "$(mise activate bash)"
 fi
 
+export STARSHIP_LOG="${STARSHIP_LOG:-error}"
+
 if command -v starship &> /dev/null; then
   eval "$(starship init bash)"
 fi

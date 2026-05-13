@@ -14,8 +14,10 @@ _resolve_root() {
 }
 
 OMACMUX_ROOT="$(_resolve_root)"
-OMACMUX_STATE="${XDG_DATA_HOME:-$HOME/.local/share}/omacmux"
-MANIFEST="$OMACMUX_STATE/manifest"
+OMACMUX_LINK_PATH="$HOME/.local/share/omacmux"
+OMACMUX_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omacmux"
+MANIFEST="$OMACMUX_STATE_DIR/manifest"
+LEGACY_MANIFEST="$OMACMUX_LINK_PATH/manifest"
 BREW_BASH="/opt/homebrew/bin/bash"
 
 source "$OMACMUX_ROOT/links.sh"
@@ -51,7 +53,10 @@ _backup_path() {
 }
 
 _manifest_init() {
-  mkdir -p "$OMACMUX_STATE"
+  mkdir -p "$OMACMUX_STATE_DIR"
+  if [[ ! -f "$MANIFEST" && -f "$LEGACY_MANIFEST" && "$LEGACY_MANIFEST" != "$MANIFEST" ]]; then
+    cp "$LEGACY_MANIFEST" "$MANIFEST"
+  fi
   if [[ ! -f "$MANIFEST" ]]; then
     printf "# omacmux link manifest — do not edit manually\n" > "$MANIFEST"
     printf "# format: strategy\\tsource\\ttarget\\tbackup_path\\n" >> "$MANIFEST"
@@ -60,22 +65,94 @@ _manifest_init() {
 
 _manifest_add() {
   local strategy="$1" source="$2" target="$3" backup="${4:-}"
-  # Remove any existing entry for this target
-  if [[ -f "$MANIFEST" ]]; then
-    local tmp; tmp=$(grep -v "	${target}	" "$MANIFEST" 2>/dev/null || true)
-    printf "%s\n" "$tmp" > "$MANIFEST"
-  fi
+  _manifest_init
+  local tmp; tmp="$(mktemp)"
+  awk -v target="$target" 'BEGIN { FS = OFS = "\t" } /^#/ || NF == 0 || $3 != target { print }' "$MANIFEST" > "$tmp"
+  mv "$tmp" "$MANIFEST"
   printf "%s\t%s\t%s\t%s\n" "$strategy" "$source" "$target" "$backup" >> "$MANIFEST"
 }
 
 _manifest_entries() {
   [[ -f "$MANIFEST" ]] || return 0
-  grep -v '^#' "$MANIFEST" | grep -v '^$' || true
+  awk 'NF && $0 !~ /^#/' "$MANIFEST" || true
 }
 
 _is_omacmux_sourced() {
-  local file="$1"
-  [[ -f "$file" ]] && grep -q 'OMACMUX_PATH\|omacmux' "$file" 2>/dev/null
+  local rel_source="$1" file="$2"
+  [[ -f "$file" ]] || return 1
+  case "$rel_source" in
+    shell/bashrc)
+      grep -Eq '# >>> omacmux shell/bashrc|source "\$OMACMUX_PATH/shell/bashrc"|source .*/omacmux/shell/bashrc' "$file" 2>/dev/null
+      ;;
+    shell/bash_profile)
+      grep -Eq '# >>> omacmux shell/bash_profile|^\[\[ -f ~/.bashrc \]\] && \. ~/.bashrc$|source ~/.bashrc|\. ~/.bashrc' "$file" 2>/dev/null
+      ;;
+    *)
+      grep -Fq "# >>> omacmux $rel_source" "$file" 2>/dev/null || \
+        grep -Fq "source \"$OMACMUX_LINK_PATH/$rel_source\"" "$file" 2>/dev/null
+      ;;
+  esac
+}
+
+_ensure_repo_link() {
+  mkdir -p "$(dirname "$OMACMUX_LINK_PATH")"
+
+  if [[ -L "$OMACMUX_LINK_PATH" ]]; then
+    rm "$OMACMUX_LINK_PATH"
+    ln -s "$OMACMUX_ROOT" "$OMACMUX_LINK_PATH"
+    return 0
+  fi
+
+  if [[ -e "$OMACMUX_LINK_PATH" ]]; then
+    if [[ "$OMACMUX_LINK_PATH" -ef "$OMACMUX_ROOT" ]]; then
+      return 0
+    fi
+    local bak; bak="$(_backup_path "$OMACMUX_LINK_PATH")"
+    mv "$OMACMUX_LINK_PATH" "$bak"
+    _dim "backed up existing ~/.local/share/omacmux to $(basename "$bak")"
+  fi
+
+  ln -s "$OMACMUX_ROOT" "$OMACMUX_LINK_PATH"
+  _ok "linked" "~/.local/share/omacmux -> $OMACMUX_ROOT"
+}
+
+_remove_merge_lines() {
+  local rel_source="$1" target="$2"
+  local tmp; tmp="$(mktemp)"
+  local status=0
+  awk '
+    /^# >>> omacmux / { skip = 1; changed = 1; next }
+    /^# <<< omacmux / { skip = 0; next }
+    skip { next }
+    { print }
+    END { if (changed) exit 10 }
+  ' "$target" > "$tmp" || status=$?
+
+  if [[ $status -eq 10 ]]; then
+    mv "$tmp" "$target"
+    return 0
+  elif [[ $status -ne 0 ]]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+
+  case "$rel_source" in
+    shell/bashrc)
+      tmp="$(mktemp)"
+      grep -v -E '^# omacmux$|^export OMACMUX_PATH="\$\{OMACMUX_PATH:-\$HOME/\.local/share/omacmux\}"$|^\[\[ \$- == \*i\* \]\] && source "\$OMACMUX_PATH/shell/bashrc"$' "$target" > "$tmp" 2>/dev/null || true
+      if ! diff -q "$target" "$tmp" &>/dev/null; then
+        mv "$tmp" "$target"
+        return 0
+      fi
+      rm -f "$tmp"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  return 1
 }
 
 # --- INIT ---
@@ -115,16 +192,7 @@ _cmd_init() {
     echo "$BREW_BASH" | sudo tee -a /etc/shells > /dev/null
   fi
 
-  # Ensure ~/.local/share/omacmux points to repo
-  mkdir -p "$(dirname "$OMACMUX_STATE")"
-  if [[ -L "$OMACMUX_STATE" ]]; then
-    ln -sf "$OMACMUX_ROOT" "$OMACMUX_STATE"
-  elif [[ -e "$OMACMUX_STATE" && ! -d "$OMACMUX_STATE" ]]; then
-    mv "$OMACMUX_STATE" "$(_backup_path "$OMACMUX_STATE")"
-    ln -s "$OMACMUX_ROOT" "$OMACMUX_STATE"
-  elif [[ ! -e "$OMACMUX_STATE" ]]; then
-    ln -s "$OMACMUX_ROOT" "$OMACMUX_STATE"
-  fi
+  _ensure_repo_link
 
   _info "Linking config files..."
   echo ""
@@ -152,7 +220,7 @@ _cmd_init() {
     fi
 
     # Already merged
-    if [[ "$strategy" == "merge" ]] && _is_omacmux_sourced "$dest"; then
+    if [[ "$strategy" == "merge" ]] && _is_omacmux_sourced "$_source" "$dest"; then
       _ok "ok" "$dest (merged)"
       _manifest_add "merge" "$src" "$dest" ""
       merged=$((merged + 1))
@@ -310,36 +378,40 @@ _write_merge_stub() {
   case "$rel_source" in
     shell/bashrc)
       cat > "$dest" <<'STUB'
-# omacmux — add your own customizations below the source line
+# >>> omacmux shell/bashrc
 export OMACMUX_PATH="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"
 [[ $- == *i* ]] && source "$OMACMUX_PATH/shell/bashrc"
+# <<< omacmux shell/bashrc
 STUB
       ;;
     shell/bash_profile)
       cat > "$dest" <<'STUB'
+# >>> omacmux shell/bash_profile
 [[ -f ~/.bashrc ]] && . ~/.bashrc
+# <<< omacmux shell/bash_profile
 STUB
       ;;
     *)
       # Generic: just source it
-      printf '# omacmux\nsource "%s/%s"\n' '$HOME/.local/share/omacmux' "$rel_source" > "$dest"
+      printf '# >>> omacmux %s\nsource "%s/%s"\n# <<< omacmux %s\n' "$rel_source" '$HOME/.local/share/omacmux' "$rel_source" "$rel_source" > "$dest"
       ;;
   esac
 }
 
 _append_source_line() {
   local rel_source="$1" dest="$2"
+  _is_omacmux_sourced "$rel_source" "$dest" && return 0
   case "$rel_source" in
     shell/bashrc)
-      printf '\n# omacmux\nexport OMACMUX_PATH="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"\n[[ $- == *i* ]] && source "$OMACMUX_PATH/shell/bashrc"\n' >> "$dest"
+      printf '\n# >>> omacmux shell/bashrc\nexport OMACMUX_PATH="${OMACMUX_PATH:-$HOME/.local/share/omacmux}"\n[[ $- == *i* ]] && source "$OMACMUX_PATH/shell/bashrc"\n# <<< omacmux shell/bashrc\n' >> "$dest"
       ;;
     shell/bash_profile)
       if ! grep -q '\. ~/.bashrc\|source ~/.bashrc' "$dest" 2>/dev/null; then
-        printf '\n[[ -f ~/.bashrc ]] && . ~/.bashrc\n' >> "$dest"
+        printf '\n# >>> omacmux shell/bash_profile\n[[ -f ~/.bashrc ]] && . ~/.bashrc\n# <<< omacmux shell/bash_profile\n' >> "$dest"
       fi
       ;;
     *)
-      printf '\n# omacmux\nsource "%s/%s"\n' '$HOME/.local/share/omacmux' "$rel_source" >> "$dest"
+      printf '\n# >>> omacmux %s\nsource "%s/%s"\n# <<< omacmux %s\n' "$rel_source" '$HOME/.local/share/omacmux' "$rel_source" "$rel_source" >> "$dest"
       ;;
   esac
 }
@@ -393,16 +465,11 @@ _cmd_unlink() {
         ;;
       merge)
         if [[ -f "$target" ]]; then
-          # Remove omacmux source lines
-          local tmp; tmp=$(mktemp)
-          grep -v 'OMACMUX_PATH\|omacmux/shell/bashrc\|# omacmux' "$target" > "$tmp" 2>/dev/null || true
-          # Only update if we actually removed something
-          if ! diff -q "$target" "$tmp" &>/dev/null; then
-            mv "$tmp" "$target"
+          local rel_source="${source#$OMACMUX_ROOT/}"
+          if _remove_merge_lines "$rel_source" "$target"; then
             _ok "cleaned" "$target — removed omacmux source lines"
             count=$((count + 1))
           else
-            rm "$tmp"
             _warn "skip" "$target — no omacmux lines found"
           fi
         fi
@@ -410,14 +477,15 @@ _cmd_unlink() {
     esac
   done < <(_manifest_entries)
 
-  # Remove state symlink
-  if [[ -L "$OMACMUX_STATE" ]]; then
-    rm "$OMACMUX_STATE"
+  # Remove source symlink
+  if [[ -L "$OMACMUX_LINK_PATH" ]]; then
+    rm "$OMACMUX_LINK_PATH"
     _ok "removed" "~/.local/share/omacmux symlink"
   fi
 
   # Clear manifest
   rm -f "$MANIFEST"
+  rmdir "$OMACMUX_STATE_DIR" 2>/dev/null || true
 
   echo ""
   _info "Done — $count files unlinked/restored"
@@ -444,7 +512,7 @@ _cmd_status() {
 
     if [[ -L "$dest" ]] && [[ "$(readlink "$dest")" == "$src" ]]; then
       state="${GREEN}linked${NC}"
-    elif [[ "$_strategy" == "merge" ]] && _is_omacmux_sourced "$dest"; then
+    elif [[ "$_strategy" == "merge" ]] && _is_omacmux_sourced "$_source" "$dest"; then
       state="${GREEN}merged${NC}"
     elif [[ -e "$dest" ]]; then
       state="${YELLOW}conflict${NC}"
@@ -512,22 +580,27 @@ _cmd_doctor() {
     issues=$((issues + broken))
   fi
 
-  # Check state dir
-  if [[ -L "$OMACMUX_STATE" && -d "$OMACMUX_STATE" ]]; then
-    _ok "ok" "state directory (~/.local/share/omacmux)"
-  elif [[ -d "$OMACMUX_STATE" ]]; then
-    _warn "warn" "state directory exists but is not a symlink"
+  # Check source link
+  if [[ -L "$OMACMUX_LINK_PATH" && "$(readlink "$OMACMUX_LINK_PATH")" == "$OMACMUX_ROOT" ]]; then
+    _ok "ok" "source link (~/.local/share/omacmux)"
+  elif [[ -L "$OMACMUX_LINK_PATH" ]]; then
+    _warn "warn" "~/.local/share/omacmux points to $(readlink "$OMACMUX_LINK_PATH")"
+    issues=$((issues + 1))
+  elif [[ -e "$OMACMUX_LINK_PATH" ]]; then
+    _warn "warn" "~/.local/share/omacmux exists but is not a symlink"
+    issues=$((issues + 1))
   else
-    _warn "missing" "state directory — run 'omacmux init'"
+    _warn "missing" "source link — run 'omacmux init'"
     issues=$((issues + 1))
   fi
 
   # Check manifest
   if [[ -f "$MANIFEST" ]]; then
-    local link_count; link_count=$(grep -cv '^#\|^$' "$MANIFEST" 2>/dev/null || echo "0")
-    _ok "ok" "manifest ($link_count entries)"
+    local link_count; link_count=$(awk 'NF && $0 !~ /^#/ { count++ } END { print count + 0 }' "$MANIFEST" 2>/dev/null || echo "0")
+    _ok "ok" "manifest ($link_count entries at $MANIFEST)"
   else
     _warn "missing" "manifest — run 'omacmux init'"
+    issues=$((issues + 1))
   fi
 
   echo ""
@@ -547,15 +620,16 @@ _cmd_upgrade() {
   # Pull latest
   _info "Pulling latest changes..."
   local before; before=$(git -C "$OMACMUX_ROOT" rev-parse HEAD 2>/dev/null || echo "")
-  git -C "$OMACMUX_ROOT" pull --rebase 2>/dev/null || {
+  local pull_ok=1
+  git -C "$OMACMUX_ROOT" pull --rebase 2>/dev/null && pull_ok=0 || {
     _warn "skip" "git pull failed (not a git repo or no remote)"
   }
   local after; after=$(git -C "$OMACMUX_ROOT" rev-parse HEAD 2>/dev/null || echo "")
 
-  if [[ -n "$before" && "$before" != "$after" ]]; then
+  if [[ $pull_ok -eq 0 && -n "$before" && "$before" != "$after" ]]; then
     _ok "updated" "${before:0:7} -> ${after:0:7}"
     git -C "$OMACMUX_ROOT" log --oneline "${before}..${after}" | sed 's/^/    /'
-  else
+  elif [[ $pull_ok -eq 0 ]]; then
     _ok "ok" "already up to date"
   fi
   echo ""
@@ -572,6 +646,7 @@ _cmd_upgrade() {
   _info "Syncing config links..."
   source "$OMACMUX_ROOT/links.sh"
   _manifest_init
+  _ensure_repo_link
 
   for entry in "${OMACMUX_LINKS[@]}"; do
     omacmux_parse_link "$entry"
@@ -582,9 +657,11 @@ _cmd_upgrade() {
 
     # Already correct
     if [[ -L "$dest" ]] && [[ "$(readlink "$dest")" == "$src" ]]; then
+      _manifest_add "$_strategy" "$src" "$dest" ""
       continue
     fi
-    if [[ "$_strategy" == "merge" ]] && _is_omacmux_sourced "$dest"; then
+    if [[ "$_strategy" == "merge" ]] && _is_omacmux_sourced "$_source" "$dest"; then
+      _manifest_add "merge" "$src" "$dest" ""
       continue
     fi
 
