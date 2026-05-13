@@ -9,8 +9,8 @@
 
 anu is **an agent-first IDE built on tmux**. Today it's labeled
 "macOS-only" because the install path uses Homebrew, the terminal is Ghostty,
-and voice/sounds/clipboard call macOS-specific binaries (`say`, `afplay`,
-`pbcopy`, `osascript`).
+and clipboard/notifications call macOS-specific binaries (`pbcopy`,
+`osascript`).
 
 But the *thing that makes anu interesting* — the swarm system, the layouts,
 the worktrees, the review system, the agent
@@ -22,14 +22,14 @@ cares that it's running on macOS.
 We split the codebase into:
 
 - **`engine/`** — the universal core. Knows nothing about any OS. Calls
-  abstract verbs (`_say`, `_sound`, `_clip`, `_notify`, `_pkg_install`,
+  abstract verbs (`_clip`, `_notify`, `_pkg_install`,
   `_stat_mtime`). Runs identically on every platform.
 - **`flavors/<name>/`** — opinionated platform implementations. Each flavor
   defines the abstract verbs concretely and ships its own installer + terminal
   config + package list.
 
-The Mac flavor stays as opinionated as it is today (Ghostty + Homebrew + `say`
-+ Apple system sounds — nothing changes for Mac users). The Linux flavor (or
+The Mac flavor stays as opinionated as it is today (Ghostty + Homebrew —
+nothing changes for Mac users). The Linux flavor (or
 flavors — Arch first, then Debian/Fedora) becomes a real first-class product,
 naturally aligned with omarchy.
 
@@ -60,17 +60,14 @@ boundary, giving it a directory, and making it the public interface.
 ## 3. Current state (concrete numbers)
 
 ```
-Total shell + tmux + CLI lines:  12,948
-Platform-touching lines:             45
-Engine ratio:                     99.65%
+Total shell + tmux + CLI lines:  ~12,900
+Platform-touching surfaces:            4
 ```
 
-The 45 platform-touching lines live in 6 surfaces:
+The remaining platform-touching lines live in 4 surfaces:
 
 | Surface | macOS impl | Files | Lines |
 |---|---|---|---|
-| TTS | `say -r 200` | `config/bash/fns/voice:28-29`, `fns/sounds:39` | 4 |
-| Sound effects | `afplay /System/Library/Sounds/*.aiff` | `fns/voice:36-45`, `fns/sounds:31` | 10 |
 | Clipboard | `pbcopy` | `config/tmux/tmux.conf:11`, `fns/git:49`, `fns/utils:70` | 3 |
 | Notifications | `osascript -e 'display notification ...'` | `config/claude/notify.sh` | 2 |
 | Installer / shell | `brew bundle`, `/opt/homebrew/bin/bash` | `bin/anu:19,100-115,470-565`, `Brewfile`, `install.sh:13-16` | ~25 |
@@ -98,8 +95,6 @@ these verbs, defined by whichever flavor is loaded at boot:
 
 | Verb | Purpose | macOS impl | Linux impl |
 |---|---|---|---|
-| `_say "<text>"` | TTS, fire-and-forget | `say -r 200 "$*" &` | `piper`, `espeak-ng`, or `spd-say` (or no-op if none) |
-| `_sound <event>` | Play a named sound (`done`, `error`, `start`, `tick`, `warning`, `finish`) | `afplay /System/Library/Sounds/<map>.aiff` | `paplay $ANU_PATH/flavors/linux/sounds/<event>.wav` |
 | `_clip` | Read stdin into clipboard | `pbcopy` | `wl-copy` ‖ `xclip -sel clip` ‖ OSC52 fallback |
 | `_paste` | Write clipboard to stdout | `pbpaste` | `wl-paste` ‖ `xclip -o` |
 | `_notify "<title>" "<body>"` | Desktop notification | `osascript -e 'display notification ...'` | `notify-send` |
@@ -107,12 +102,11 @@ these verbs, defined by whichever flavor is loaded at boot:
 | `_stat_mtime <path>` | Print file mtime, ISO format | `stat -f "%Sm" -t "%Y-%m-%d"` | `stat -c "%y"` (parse to date) |
 | `_default_shell` | Set bash 5 as login shell | brew bash + `/etc/shells` dance | no-op (Linux already has bash 5) |
 
-The contract is **small on purpose**. Anything more specific than these eight
+The contract is **small on purpose**. Anything more specific than these six
 verbs leaks platform knowledge into the engine.
 
-Every flavor MUST implement every verb. Verbs may be no-ops (e.g. headless
-flavor's `_say`/`_sound` do nothing) but they must exist so the engine never
-has to check.
+Every flavor MUST implement every verb. Verbs may be no-ops where appropriate,
+but they must exist so the engine never has to check.
 
 ---
 
@@ -146,7 +140,7 @@ anu/
 │
 ├── flavors/
 │   ├── darwin/
-│   │   ├── platform.sh              # _say, _sound, _clip, _paste, _notify, _pkg_install, _stat_mtime, _default_shell
+│   │   ├── platform.sh              # _clip, _paste, _notify, _pkg_install, _stat_mtime, _default_shell
 │   │   ├── ghostty/config           # full Mac config with macos-* keys
 │   │   ├── Brewfile                 # canonical Mac package list
 │   │   ├── claude-notify.sh         # osascript implementation
@@ -158,14 +152,13 @@ anu/
 │   │   ├── ghostty/config           # same minus 3 macos-* keys
 │   │   ├── packages.txt             # one-pkg-per-line, mapped from Brewfile
 │   │   ├── claude-notify.sh         # notify-send
-│   │   ├── sounds/{done,error,start,tick,warning,finish}.wav
 │   │   ├── install.sh               # pacman dispatch; offers AUR for non-pacman pkgs
 │   │   ├── PKGBUILD                 # for AUR distribution
 │   │   └── README.md
 │   │
 │   ├── debian/                      # apt-based; identical structure
 │   ├── fedora/                      # dnf-based; identical structure
-│   └── headless/                    # SSH/server: _say/_sound = no-op, _clip = OSC52
+│   └── headless/                    # SSH/server: _clip = OSC52, _notify may be no-op
 │
 └── tests/
     ├── engine/                      # tests that work in any flavor (Docker matrix)
@@ -193,7 +186,7 @@ Each phase ends in a green commit. Stop at any phase.
 ### Phase 0 — Define the contract (no code changes)
 
 **Output:** `engine/CONTRACT.md` (or stage at repo root and move later).
-Document the 8 verbs, signatures, no-op semantics, and how flavors are
+Document the 6 verbs, signatures, no-op semantics, and how flavors are
 selected. This is the spec the engine codes to.
 
 **Why first:** the contract is the only thing in this plan that needs
@@ -212,8 +205,6 @@ behavior stays bit-identical.
 1. Create `config/bash/platform.sh` (the loader) and
    `config/bash/platforms/darwin.sh` (the Mac backend).
 2. Convert callsites:
-   - `fns/voice:28-29,36-45` → `_say`, `_sound`
-   - `fns/sounds:31,39` → `_sound`, `_say`
    - `fns/utils:70` → `_clip`
    - `fns/git:49` → `_clip`
    - `config/tmux/tmux.conf:11` → bind to a small wrapper script that calls `_clip`
@@ -221,35 +212,31 @@ behavior stays bit-identical.
 3. Source `platform.sh` from `config/bash/init` so verbs are loaded into every
    shell.
 
-**Done when:** voice/sounds/clipboard/notifications work identically on Mac,
-with zero direct calls to `say`/`afplay`/`pbcopy`/`osascript` in the engine
-code path. `grep -rE 'say|afplay|pbcopy|osascript|/System/Library' config/`
+**Done when:** clipboard/notifications work identically on Mac,
+with zero direct calls to `pbcopy`/`osascript` in the engine
+code path. `grep -rE 'pbcopy|osascript' config/`
 returns hits *only* in `config/bash/platforms/darwin.sh`.
 
 ---
 
 ### Phase 2 — Add the Linux backend + installer dispatch
 
-1. `config/bash/platforms/linux.sh` implementing all 8 verbs:
-   - `_say`: `command -v piper && piper --voice ... <<< "$*"` ‖ `espeak-ng` ‖ no-op
-   - `_sound`: `paplay "$ANU_PATH/.../sounds/$1.wav"`
+1. `config/bash/platforms/linux.sh` implementing all 6 verbs:
    - `_clip`: `wl-copy` ‖ `xclip -sel clip` ‖ OSC52 via `tmux load-buffer`
    - `_paste`: mirror
    - `_notify`: `notify-send "$1" "$2"`
    - `_pkg_install`: detect `pacman`/`apt`/`dnf`, map from a package alias table
    - `_stat_mtime`: GNU `stat -c "%y"` parsed to ISO date
    - `_default_shell`: no-op
-2. Bundle royalty-free `.wav` files for the 6 sound events (or generate
-   tones with `sox`).
-3. `bin/anu`: replace the macOS guard and the
+2. `bin/anu`: replace the macOS guard and the
    `HOMEBREW_NO_AUTO_UPDATE=1 brew bundle` block with `_pkg_install` driven by
    a `packages.toml` that maps `Brewfile` entries to per-distro names.
-4. `install.sh`: drop the `[[ "$(uname)" != "Darwin" ]] && exit 1` and
+3. `install.sh`: drop the `[[ "$(uname)" != "Darwin" ]] && exit 1` and
    dispatch to the right flavor installer.
 
 **Done when:** on a fresh Arch container, `git clone && ./install.sh && anu init`
 produces a working shell where `t`, `tdl cx`, `swarm start 4 cx`,
-`who`, `tell alpha "hi"`, and `recap` all work. Mac behavior unchanged.
+`pd`, and `review` all work. Mac behavior unchanged.
 
 ---
 
@@ -263,14 +250,14 @@ This is mechanical once Phases 1–2 are clean.
    move `Brewfile`, `config/ghostty/config`, the macOS `claude/notify.sh`
    into `flavors/darwin/`.
 4. `git mv config/bash/platforms/linux.sh flavors/arch/platform.sh`; move
-   sounds, packages list, etc.
+   packages list, etc.
 5. Update `engine/links.sh` so symlink targets are relative to whichever
    flavor is active.
 6. Update `engine/config/bash/platform.sh` to source from
    `$ANU_PATH/flavors/$ANU_FLAVOR/`.
 
 **Done when:** `engine/` contains zero references to specific platforms,
-`grep -r 'Darwin\|brew\|pbcopy\|afplay\|/System/Library' engine/` is empty,
+`grep -r 'Darwin\|brew\|pbcopy' engine/` is empty,
 and both Mac + Arch installs still work.
 
 ---
@@ -306,9 +293,8 @@ swarm start 2 echo           # 2 workers with stub command
 swarm broadcast "ping"       # message delivery
 swarm capture agent-1        # output capture
 swarm kill                   # clean teardown
-who                          # NATO names render
-recap                        # AI summary survives no-op git state
-_say "hello" && _sound done && echo x | _clip   # contract verbs return 0
+echo x | _clip               # clipboard contract returns 0
+_notify "anu" "smoke test"   # notification contract returns 0
 ```
 
 Run on:
@@ -327,20 +313,14 @@ exit code, the contract is wrong, not the test.
 These are the choices that shape the contract. Pick before writing the shim:
 
 1. **Flavor selection precedence.** `ANU_FLAVOR` env var → `$ANU_STATE/flavor` file → uname default. Confirm this order; future-you will want override-by-env for SSH cases.
-2. **Voice quality on Linux.** Default off, or default on with `espeak-ng`?
-   `piper` produces near-`say` quality but is a separate install. Recommendation:
-   default off; document `piper` as the "premium" install. Mac stays default-on.
-3. **Sound assets.** Bundle `.wav` files per flavor, or use `tput bel`?
-   Recommendation: bundle six small (~5KB each) royalty-free `.wav`s in
-   `flavors/<linux>/sounds/`. Consistent with Mac UX.
-4. **Ghostty on Linux.** Ship a Linux Ghostty config, or stay terminal-agnostic?
+2. **Ghostty on Linux.** Ship a Linux Ghostty config, or stay terminal-agnostic?
    Recommendation: ship Ghostty config (works on Linux now, Wayland + X11)
    AND document Alacritty/Kitty/WezTerm/Foot as supported. The terminal isn't
    load-bearing for the engine; it just needs truecolor + Nerd Font.
-5. **Where Brewfile lives.** Keep at repo root for backwards compat, or move
+3. **Where Brewfile lives.** Keep at repo root for backwards compat, or move
    into `flavors/darwin/`? Recommendation: move. Backwards compat is a
    non-goal; clean structure wins.
-6. **Headless flavor — Phase 4 or skip?** It's the cheapest test of whether
+4. **Headless flavor — Phase 4 or skip?** It's the cheapest test of whether
    the contract is right. Recommendation: ship it in Phase 4. 60 lines, big
    payoff for SSH/server use.
 

@@ -1234,8 +1234,6 @@ _mesh_spawn() {
   for c in "${counts[@]}"; do (( total_agents += c )); done
   local num_devices=${#devices[@]}
 
-  command -v _voice_say &>/dev/null && _voice_say "Spawning $total_agents agents across $num_devices devices"
-
   # Generate swarm state
   local swarm_id
   swarm_id=$(date +%s | shasum | head -c 8)

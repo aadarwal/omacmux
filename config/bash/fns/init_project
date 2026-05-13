@@ -15,8 +15,6 @@
 # ------------------------------------------------------------------------------
 
 _init_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/anu/init"
-command -v _voice_say &>/dev/null || _voice_say() { :; }
-command -v _voice_sound &>/dev/null || _voice_sound() { :; }
 
 # ------------------------------------------------------------------------------
 # Internal helpers
@@ -138,20 +136,14 @@ anu_init() {
 
   mkdir -p "$_init_state_dir"
 
-  _voice_say "Initializing project analysis"
-  _voice_sound start
-
   # Step 1: Profile the repo
   local profile_path="$_init_state_dir/profile.md"
 
   echo -e "\033[36minit:\033[0m profiling repository..."
   _init_profile_repo "$profile_path" || {
     echo "init: failed to profile repo" >&2
-    _voice_sound error
     return 1
   }
-
-  _voice_say "Profile complete, generating recommendations"
 
   # Step 2: Generate AGENTS.md via Claude
   echo -e "\033[36minit:\033[0m generating AGENTS.md..."
@@ -159,12 +151,8 @@ anu_init() {
 
   _init_generate_agents_md "$profile_path" "$agents_md" || {
     echo "init: failed to generate AGENTS.md" >&2
-    _voice_sound error
     return 1
   }
-
-  _voice_say "AGENTS.md created"
-  _voice_sound done
 
   echo -e "\033[36minit:\033[0m wrote $agents_md"
   echo -e "\033[36minit:\033[0m done — review AGENTS.md for swarm recommendations"

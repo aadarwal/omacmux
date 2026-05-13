@@ -18,7 +18,6 @@ command -v _mesh_devices &>/dev/null || _mesh_devices() { :; }
 command -v _mesh_picks &>/dev/null || _mesh_picks() { :; }
 command -v _mesh_device_user &>/dev/null || _mesh_device_user() { :; }
 command -v _mesh_device_ip &>/dev/null || _mesh_device_ip() { :; }
-command -v _voice_say &>/dev/null || _voice_say() { :; }
 
 # ------------------------------------------------------------------------------
 # Internal helpers
@@ -129,7 +128,6 @@ _meshsync_on() {
     > "$state_file"
 
   echo -e "\033[32mMesh sync ON\033[0m — every ${interval}s to ${#devices[@]} device(s) (PID: $bg_pid)"
-  _voice_say "Mesh sync started with ${#devices[@]} devices, every ${interval} seconds"
 }
 
 _meshsync_off() {
@@ -148,7 +146,6 @@ _meshsync_off() {
   rm -f "$state_file"
 
   echo -e "\033[32mMesh sync OFF\033[0m"
-  _voice_say "Mesh sync stopped"
 }
 
 _meshsync_status() {

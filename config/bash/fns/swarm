@@ -1212,7 +1212,6 @@ _swarm_gate_approve() {
     _swarm_send_keys "agent-${next_stage}" "Gate approved. You may proceed. Read $swarm_dir/results/agent-${target_stage}.md for the previous stage's output."
   fi
 
-  _voice_say "Gate approved for stage $target_stage" 2>/dev/null
   echo "swarm: gate: approved stage $target_stage"
 }
 
@@ -1258,7 +1257,6 @@ _swarm_gate_reject() {
   # Send rejection feedback to the stage that produced the output
   _swarm_send_keys "agent-${target_stage}" "Gate rejected: $reason. Please revise your output and rewrite results/agent-${target_stage}.md, then signal completion again."
 
-  _voice_say "Gate rejected for stage $target_stage" 2>/dev/null
   echo "swarm: gate: rejected stage $target_stage -- $reason"
 }
 
@@ -1401,7 +1399,6 @@ _swarm_pipe() {
   done
 
   if [[ "$gated" == "true" ]]; then
-    _voice_say "Gated pipeline created with $count stages"
     echo "swarm: topology set to gated pipe ($count stages)"
   else
     echo "swarm: topology set to pipe ($count stages)"
@@ -2234,17 +2231,6 @@ _swarm_badge() {
 # Tournament: multi-round competitive agent topology
 # ------------------------------------------------------------------------------
 
-# Voice helper (no-op if voice system not loaded)
-command -v _voice_say &>/dev/null || _voice_say() { :; }
-command -v _voice_sound &>/dev/null || _voice_sound() { :; }
-
-# NATO name lookup for agent IDs (standalone; see also _an_display_name in agentnames)
-_swarm_tournament_name() {
-  local -a names=(alpha bravo charlie delta echo foxtrot golf hotel)
-  local n="${1#agent-}"
-  (( n >= 1 && n <= ${#names[@]} )) && echo "${names[$((n-1))]}" || echo "$1"
-}
-
 # Sub-dispatcher for tournament commands
 _swarm_tournament() {
   case "${1:-}" in
@@ -2283,8 +2269,6 @@ _swarm_tournament_start() {
 
   local repo_root
   repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "swarm tournament: not in a git repo."; return 1; }
-
-  _voice_say "Starting tournament with $count agents and $rounds rounds"
 
   # Create worktree swarm for round 1
   _swarm_wt "$count" "$cmd" --name "tourney-$(_swarm_gen_id)"
@@ -2357,8 +2341,6 @@ _swarm_tournament_evaluate() {
   status=$(jq -r '.status' "$_cfg")
 
   [[ "$status" != "running" ]] && { echo "swarm tournament: tournament is $status."; return 1; }
-
-  _voice_say "Scoring round $current_round"
 
   # Collect all survivor outputs
   local -a survivors
@@ -2435,8 +2417,7 @@ Score each agent from 1 to 10 based on the criteria. Return ONLY a JSON array wi
   local survivor_count=${#survivors[@]}
   while IFS=$'\t' read -r agent score notes; do
     [[ -z "$agent" ]] && continue
-    local name color
-    name=$(_swarm_tournament_name "$agent")
+    local color
     if (( rank == 1 )); then
       color="$_sw_gold"
     elif (( rank <= survivor_count / 2 )); then
@@ -2444,8 +2425,8 @@ Score each agent from 1 to 10 based on the criteria. Return ONLY a JSON array wi
     else
       color="$_sw_red"
     fi
-    printf "  ${color}#%d${_sw_reset}  %-12s (%-8s)  ${_sw_bold}%s/10${_sw_reset}  %s\n" \
-      "$rank" "$agent" "$name" "$score" "$notes"
+    printf "  ${color}#%d${_sw_reset}  %-12s  ${_sw_bold}%s/10${_sw_reset}  %s\n" \
+      "$rank" "$agent" "$score" "$notes"
     (( rank++ ))
   done <<< "$sorted"
   echo ""
@@ -2482,8 +2463,7 @@ _swarm_tournament_prune() {
   # Kill eliminated agents
   for agent_id in "${elim_agents[@]}"; do
     [[ -z "$agent_id" ]] && continue
-    local name pane_id
-    name=$(_swarm_tournament_name "$agent_id")
+    local pane_id
     pane_id=$(jq -r '.pane_id' "$swarm_dir/agents/$agent_id.json" 2>/dev/null)
 
     if [[ -n "$pane_id" && "$pane_id" != "$TMUX_PANE" ]]; then
@@ -2494,7 +2474,7 @@ _swarm_tournament_prune() {
     tmp=$(jq '.status = "eliminated"' "$swarm_dir/agents/$agent_id.json")
     echo "$tmp" > "$swarm_dir/agents/$agent_id.json"
 
-    printf "  ${_sw_red}ELIMINATED${_sw_reset}: %s (%s)\n" "$agent_id" "$name"
+    printf "  ${_sw_red}ELIMINATED${_sw_reset}: %s\n" "$agent_id"
   done
 
   # Update tournament config
@@ -2511,8 +2491,6 @@ _swarm_tournament_prune() {
     '.survivors = $survivors | .eliminated = $eliminated' \
     "$swarm_dir/tournament/config.json")
   echo "$tmp" > "$swarm_dir/tournament/config.json"
-
-  _voice_say "Eliminated ${#elim_agents[@]} agents. ${#keep_agents[@]} survivors advance to round $((current_round + 1))."
 
   printf "\n  ${_sw_bold}${#keep_agents[@]} survivors advance to round %d.${_sw_reset}\n\n" "$((current_round + 1))"
 
@@ -2535,8 +2513,6 @@ _swarm_tournament_advance() {
   tmp=$(jq --argjson r "$next_round" '.current_round = $r' "$swarm_dir/tournament/config.json")
   echo "$tmp" > "$swarm_dir/tournament/config.json"
 
-  _voice_say "Starting round $next_round"
-
   # Broadcast refined prompt to survivors
   local refined_prompt="TOURNAMENT ROUND $next_round: Build on your previous work. Improve and refine your implementation. $task"
   for agent_id in "${survivors[@]}"; do
@@ -2558,12 +2534,11 @@ _swarm_tournament_finalize() {
   local _sw_gold='\033[33m'
 
   # Get winner (highest score)
-  local winner winner_score winner_branch winner_name
+  local winner winner_score winner_branch
   local _top
   _top=$(echo "$scores_json" | jq -r 'sort_by(-.score) | .[0] | "\(.agent)\t\(.score)"')
   winner="${_top%%	*}"
   winner_score="${_top##*	}"
-  winner_name=$(_swarm_tournament_name "$winner")
   winner_branch=$(jq -r '.branch // "unknown"' "$swarm_dir/agents/$winner.json" 2>/dev/null)
 
   # Update config
@@ -2571,11 +2546,8 @@ _swarm_tournament_finalize() {
   tmp=$(jq --arg w "$winner" '.winner = $w | .status = "complete"' "$swarm_dir/tournament/config.json")
   echo "$tmp" > "$swarm_dir/tournament/config.json"
 
-  _voice_sound done
-  _voice_say "Tournament complete. $winner_name wins with a score of $winner_score out of 10."
-
-  printf "\n  ${_sw_gold}${_sw_bold}WINNER: %s (%s) with score %s/10${_sw_reset}\n" \
-    "$winner" "$winner_name" "$winner_score"
+  printf "\n  ${_sw_gold}${_sw_bold}WINNER: %s with score %s/10${_sw_reset}\n" \
+    "$winner" "$winner_score"
   printf "  Branch: %s\n\n" "$winner_branch"
 
   # Offer merge
@@ -2621,12 +2593,10 @@ _swarm_tournament_status() {
   local -a survivors
   mapfile -t survivors < <(jq -r '.survivors[]' "$swarm_dir/tournament/config.json")
   for agent_id in "${survivors[@]}"; do
-    local name
-    name=$(_swarm_tournament_name "$agent_id")
     if [[ -n "$winner" && "$agent_id" == "$winner" ]]; then
-      printf "  ${_sw_gold}*${_sw_reset} %-12s (%s)  ${_sw_gold}WINNER${_sw_reset}\n" "$agent_id" "$name"
+      printf "  ${_sw_gold}*${_sw_reset} %-12s  ${_sw_gold}WINNER${_sw_reset}\n" "$agent_id"
     else
-      printf "  ${_sw_green}*${_sw_reset} %-12s (%s)\n" "$agent_id" "$name"
+      printf "  ${_sw_green}*${_sw_reset} %-12s\n" "$agent_id"
     fi
   done
 
@@ -2637,9 +2607,7 @@ _swarm_tournament_status() {
     printf "\n  ${_sw_bold}ELIMINATED${_sw_reset}\n"
     for agent_id in "${eliminated[@]}"; do
       [[ -z "$agent_id" ]] && continue
-      local name
-      name=$(_swarm_tournament_name "$agent_id")
-      printf "  ${_sw_red}x${_sw_reset} ${_sw_dim}%-12s (%s)${_sw_reset}\n" "$agent_id" "$name"
+      printf "  ${_sw_red}x${_sw_reset} ${_sw_dim}%-12s${_sw_reset}\n" "$agent_id"
     done
   fi
 
@@ -2708,7 +2676,6 @@ _swarm_checkpoint() {
 }
 EOF
 
-  _voice_say "Checkpoint saved" 2>/dev/null
   echo "swarm: checkpoint saved ($pane_count agents) → $ckpt_dir"
 }
 
@@ -2835,7 +2802,6 @@ _swarm_restore() {
   fi
 
   tmux select-pane -t "${panes[0]}"
-  _voice_say "Swarm restored with $count agents" 2>/dev/null
   echo "swarm: restored '$name' ($target_id) with $count agents [$topology]"
 }
 

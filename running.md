@@ -13,7 +13,7 @@
 9. in general how does this extend into something that the agents can themselves use to get stuff done? like because this is bash that helps or how exactly does this work? 
 10. for any given project I want to be able to see the worktrees and branches and everything that exists... that is the bare minimum here clearly. trying to underdstand what the best way to see that is? just tmux panes?... like a fixed tmux pane of some sort? tat is vertical on the side and reads out the project dirs etc in the kind of way that the nvim/ lazyvim setup does? what is the best way to do this? - that was the most interesting thing to me... im thinking like the philosophy here is that my IDE is itself tiling windows. that is something that is possible within tmux? i feel like this is something that is true and we should explore this direction. 
 11. what all is cached and git ignored needs to be understood. 
-12. need to be able to turn on and off auto commits for when in mass vibe mode. 
+12. need to be able to turn on and off auto commits for when running large agent swarms.
 13. how does it let me run cxx or whatever cc setting i want in the middle. that is needed without a doubt. 
 14. these bash sleep commands need to be trigged in the other direction. 
 15. there needs to be a swarm that would think in terms of worktrees: what else could I do like this? then they would assemble the avengers... 
@@ -25,7 +25,6 @@
 19. I want to be able to see in some way the kinds of things that I am working on and not just in a local fashion - that is the thing that is basically extremeley importyant to me. 
 20. need to understand the benefit of docker here. 
 21. what are some memories that should be present for every project ? - and is the best way to do this kind of a thing even memories?  
-22. i feel like there is an extensive use case here for just voice commands. this seems like a great system to work with that imo for sure. 
 23. lets say I am in the middle of a project, that is within a window in a given tmux session. and now I want to expand. what the fuck do i do then bruh? 
 
 - I want to be able to visually see as this kind of a project evolves. 

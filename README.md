@@ -40,16 +40,6 @@ t              # start tmux
 tdl cx         # dev layout: nvim + claude + terminal
 ```
 
-Or go straight to voice-driven agent work:
-
-```bash
-voice on       # enable audio feedback
-vibe           # launch 4 agents in one word
-check          # "4 agents active, 12 files changed"
-recap          # AI summary of what changed
-vibe stop      # tear it all down
-```
-
 ---
 
 ## The Stack
@@ -220,58 +210,6 @@ When a swarm finishes, you don't want to read 200 raw diffs. The review system s
 | `review <agent> <file>` | AI-explained diff for a single file |
 | `review conflicts` | Cross-agent conflict analysis |
 | `reviewd` | Dashboard mode: persistent pane, auto-refreshing |
-
----
-
-## Voice Mode
-
-anu is designed to be driven by voice via [Wispr Flow](https://wispr.ai) or any voice-to-text tool. Voice mode adds TTS feedback and sound effects so you know what's happening without staring at the terminal.
-
-### Toggle
-
-```bash
-voice on       # hear "Voice mode active"
-voice off      # hear "Voice mode off", then silence
-voice status   # check state
-```
-
-### Voice Commands
-
-These are the commands you'd speak. Short, unambiguous, composable.
-
-| Command | Description |
-|---------|-------------|
-| `vibe [n]` | Launch N agents (default 4). One word to start working. |
-| `vibe stop` | Kill swarm |
-| `check` | Spoken status: "3 agents active, 47 files changed" |
-| `ship [branch]` | Push branch, report PR URL |
-| `focus <name>` | Switch to an agent's pane |
-| `recap` | AI summary of what changed on this branch |
-
-### Agent Names (NATO Phonetic)
-
-Agents get NATO names automatically — no setup. Agent-1 is Alpha, agent-2 is Bravo, etc.
-
-| Command | Description |
-|---------|-------------|
-| `who` | List agents with names and activity |
-| `tell <name> "<msg>"` | Send message to named agent |
-| `name <ref> <nickname>` | Give an agent a custom name |
-
-```bash
-who                           # "Alpha: active, Bravo: active, Charlie: idle"
-tell alpha "focus on auth"    # sends to agent-1
-tell bravo "write tests"      # sends to agent-2
-name 3 scout                  # agent-3 is now "scout"
-focus scout                   # switch to scout's pane
-```
-
-### Audio Feedback
-
-When voice mode is on:
-- **Notifications** from Claude Code are spoken aloud
-- **Sound effects** play for swarm events (start, done, error)
-- All commands announce what they're doing
 
 ## Project Dashboard
 
@@ -522,8 +460,6 @@ anu exposes the repo at `~/.local/share/anu/` and stores runtime feature state u
 |-----------|----------|
 | `swarms/` | Swarm metadata, agent state, mailboxes |
 | `reviews/` | Cached AI summaries per commit SHA |
-| `voice/` | Voice mode toggle state |
-| `agentnames/` | Custom agent nicknames |
 | `mesh/` | Tailscale device cache, host definitions |
 
 The installer link manifest lives separately at `~/.local/state/anu/manifest` so `anu unlink` can restore configs without writing installer bookkeeping into the repo.
@@ -533,10 +469,9 @@ The installer link manifest lives separately at `~/.local/state/anu/manifest` so
 ## Notes
 
 - **Bash 5+** required for `tsl`. The installer offers to set Homebrew bash as default.
-- **macOS only** — uses Ghostty, `say` (TTS), `afplay` (sounds), `osascript` (notifications).
+- **macOS only** — uses Ghostty, `pbcopy` (clipboard), and `osascript` (notifications).
 - **Mission Control** — `Ctrl+Option+Shift+Arrows` may conflict. Disable in System Settings > Keyboard > Keyboard Shortcuts > Mission Control.
 - **First nvim launch** auto-installs 46 plugins via lazy.nvim (~30-60s).
-- **Voice mode** requires [Wispr Flow](https://wispr.ai) or any voice-to-text tool for input. TTS output uses macOS built-in `say`.
 
 ---
 

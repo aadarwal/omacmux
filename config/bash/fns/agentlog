@@ -6,17 +6,14 @@
 # Browse, filter, and tail agent communication history.
 #
 # Usage:
-#   agentlog alpha                  # browse agent-1's log (fzf)
-#   agentlog alpha --tail 20       # last 20 entries
-#   agentlog alpha --since 10m     # entries from last 10 minutes
-#   agentlog alpha --since 1h      # entries from last hour
+#   agentlog agent-1                # browse agent-1's log (fzf)
+#   agentlog agent-1 --tail 20      # last 20 entries
+#   agentlog agent-1 --since 10m    # entries from last 10 minutes
+#   agentlog agent-1 --since 1h     # entries from last hour
 
 # Stub guards
 command -v _swarm_current_id &>/dev/null || _swarm_current_id() { return 1; }
 command -v _swarm_state_dir &>/dev/null || _swarm_state_dir() { echo "$HOME/.local/share/anu/swarms"; }
-command -v _an_resolve &>/dev/null || _an_resolve() { echo "$1"; }
-command -v _an_display_name &>/dev/null || _an_display_name() { echo "$1"; }
-command -v _voice_say &>/dev/null || _voice_say() { :; }
 
 # ------------------------------------------------------------------------------
 # Internal helpers
@@ -100,8 +97,6 @@ _agentlog_browse() {
   local logfile="$1" name="$2"
   [[ ! -f "$logfile" ]] && { echo "No log entries for $name."; return 1; }
 
-  _voice_say "Showing log for $name"
-
   fzf --tmux 80%,60% \
     --header "Agent Log: $name" \
     --preview 'echo {}' \
@@ -129,16 +124,10 @@ agentlog() {
     esac
   done
 
-  [[ -z "$agent_name" ]] && { echo "Usage: agentlog <agent-name> [--since <duration>] [--tail <n>]"; return 1; }
+  [[ -z "$agent_name" ]] && { echo "Usage: agentlog <agent-id> [--since <duration>] [--tail <n>]"; return 1; }
 
-  # Resolve NATO name to agent-N
   local agent_id
-  agent_id=$(_an_resolve "$agent_name") 2>/dev/null
-  [[ -z "$agent_id" ]] && agent_id="$agent_name"
-
-  local display_name
-  display_name=$(_an_display_name "$agent_id" 2>/dev/null)
-  [[ -z "$display_name" ]] && display_name="$agent_id"
+  agent_id="$agent_name"
 
   local swarm_id
   swarm_id=$(_swarm_current_id 2>/dev/null)
@@ -152,6 +141,6 @@ agentlog() {
   elif [[ -n "$since" ]]; then
     _agentlog_filter "$logfile" "$since"
   else
-    _agentlog_browse "$logfile" "$display_name"
+    _agentlog_browse "$logfile" "$agent_id"
   fi
 }
