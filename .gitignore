@@ -1,6 +1,7 @@
 # Runtime state created during local use.
 /swarms/
 /recipes/
+/www_ideas/
 
 # Removed local dashboard feature; keep accidental generated copies out.
 /remote/
