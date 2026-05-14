@@ -61,7 +61,7 @@ vibe stop      # tear it all down
 | Editor | [Neovim](https://neovim.io) + [LazyVim](https://www.lazyvim.org) |
 | Prompt | [Starship](https://starship.rs) |
 | Shell | Bash 5 + [eza](https://eza.rocks) + [fzf](https://junegunn.github.io/fzf/) + [zoxide](https://github.com/ajeetdsouza/zoxide) + [bat](https://github.com/sharkdp/bat) + [mise](https://mise.jdx.dev) |
-| AI | [Claude Code](https://claude.ai/code), [opencode](https://github.com/sst/opencode), [Codex](https://openai.com/index/codex/), or anything that runs in a terminal |
+| AI | [Claude Code](https://claude.ai/code), [opencode](https://github.com/sst/opencode), [Codex](https://openai.com/index/codex/), Cursor SDK, or anything that runs in a terminal |
 
 ---
 
@@ -204,7 +204,29 @@ The swarm system lets you orchestrate multiple AI agents across different topolo
 | `al [cmd]` | Launch agent in a new split pane (fzf picker) |
 | `alw [cmd]` | Launch agent in a new window |
 
-Available agent aliases: `cx` (Claude), `cxx` (Claude full-auto), `c` (OpenCode), `cdx` (Codex), `cdxx` (Codex full-auto).
+Available agent aliases: `cx` (Claude), `cxx` (Claude full-auto), `c` (OpenCode), `cdx` (Codex), `cdxx` (Codex full-auto), `cs` (Cursor SDK local), `csf` (Cursor SDK local with stuck-run recovery), `csc` (Cursor SDK cloud).
+
+### Cursor SDK
+
+`omacmux-cursor-agent` wraps the public beta `@cursor/sdk` as a plain terminal
+agent, so it works anywhere omacmux can launch an agent pane.
+
+```bash
+cssetup                      # install @cursor/sdk into user state
+export CURSOR_API_KEY=...    # Cursor dashboard integration key
+csdoctor                     # verify node, sdk, API key, and cloud repo target
+
+tdl cs                       # nvim + Cursor SDK local agent
+cs "summarize this repo"     # one-shot local prompt
+csc "plan a cleanup"         # cloud agent against current GitHub remote
+swarm wt 3 cs                # worktree-isolated Cursor SDK swarm
+```
+
+The local wrapper loads project Cursor config by default
+(`local.settingSources = ["project"]`), so committed `.cursor/skills` and
+`.cursor/agents` can guide SDK agents without pulling in user-level Cursor
+settings. See `docs/cursor-sdk-integration.md` for the design notes and
+tradeoffs.
 
 ---
 

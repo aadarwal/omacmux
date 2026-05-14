@@ -1,0 +1,19 @@
+# ==============================================================================
+# Cursor SDK helpers
+# ==============================================================================
+
+cssetup() {
+  omacmux-cursor-agent setup "$@"
+}
+
+csdoctor() {
+  omacmux-cursor-agent doctor "$@"
+}
+
+csmodels() {
+  omacmux-cursor-agent models "$@"
+}
+
+csrepo() {
+  omacmux-cursor-agent cloud-repo "$@"
+}

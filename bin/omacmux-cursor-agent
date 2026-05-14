@@ -1,0 +1,1039 @@
+#!/usr/bin/env node
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import process from "node:process";
+import readline from "node:readline/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const SDK_PACKAGE = process.env.OMACMUX_CURSOR_SDK_PACKAGE || "@cursor/sdk@1.0.12";
+const DEFAULT_MODEL =
+  process.env.OMACMUX_CURSOR_MODEL || process.env.CURSOR_MODEL || "composer-2";
+const DEFAULT_SETTING_SOURCES =
+  process.env.OMACMUX_CURSOR_SETTING_SOURCES || "project";
+
+const scriptPath = fileURLToPath(import.meta.url);
+const repoRoot = path.resolve(path.dirname(scriptPath), "..");
+const dataHome = process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share");
+const vendorDir =
+  process.env.OMACMUX_CURSOR_SDK_HOME || path.join(dataHome, "omacmux-cursor-sdk");
+
+let activeRun = null;
+let shuttingDown = false;
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+
+  if (options.help) {
+    printHelp();
+    return;
+  }
+
+  switch (options.command) {
+    case "setup":
+      setupDependencies();
+      return;
+    case "doctor":
+      doctor();
+      return;
+    case "cloud-repo":
+      printCloudRepository(options);
+      return;
+    default:
+      break;
+  }
+
+  const sdk = await loadCursorSdk();
+
+  if (options.command === "models") {
+    await listModels(sdk.Cursor, options);
+    return;
+  }
+
+  const apiKey = options.apiKey || process.env.CURSOR_API_KEY;
+  if (!apiKey) {
+    throw new Error("CURSOR_API_KEY is not set. Run `csdoctor` for setup help.");
+  }
+
+  options.apiKey = apiKey;
+  installSignalHandlers();
+
+  if (options.prompt) {
+    const agent = await createAgent(sdk.Agent, options);
+    try {
+      const result = await sendPrompt(agent, options.prompt, options);
+      process.exitCode = result.status === "finished" ? 0 : 1;
+    } finally {
+      await disposeAgent(agent);
+    }
+    return;
+  }
+
+  if (!process.stdin.isTTY) {
+    const prompt = (await readStdin()).trim();
+    if (!prompt) {
+      throw new Error("No prompt was provided on stdin.");
+    }
+
+    const agent = await createAgent(sdk.Agent, options);
+    try {
+      const result = await sendPrompt(agent, prompt, options);
+      process.exitCode = result.status === "finished" ? 0 : 1;
+    } finally {
+      await disposeAgent(agent);
+    }
+    return;
+  }
+
+  await runInteractive(sdk, options);
+}
+
+function parseArgs(argv) {
+  const options = {
+    apiKey: undefined,
+    autoPr: false,
+    command: "run",
+    cwd: process.cwd(),
+    force: false,
+    help: false,
+    json: false,
+    model: DEFAULT_MODEL,
+    name: "omacmux Cursor SDK agent",
+    plain: false,
+    prompt: "",
+    repo: undefined,
+    resume: undefined,
+    runtime: process.env.OMACMUX_CURSOR_RUNTIME || "local",
+    sandbox: undefined,
+    settingSources: DEFAULT_SETTING_SOURCES,
+    showThinking: false,
+    startingRef: undefined,
+    workOnCurrentBranch: false,
+  };
+
+  const promptParts = [];
+  let sawPromptSeparator = false;
+
+  if (argv[0] && ["setup", "doctor", "models", "cloud-repo", "help"].includes(argv[0])) {
+    options.command = argv.shift();
+    if (options.command === "help") {
+      options.help = true;
+    }
+  }
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+
+    if (sawPromptSeparator) {
+      promptParts.push(arg);
+      continue;
+    }
+
+    if (arg === "--") {
+      sawPromptSeparator = true;
+      continue;
+    }
+
+    if (arg === "-h" || arg === "--help") {
+      options.help = true;
+      continue;
+    }
+
+    if (arg === "--local") {
+      options.runtime = "local";
+      continue;
+    }
+
+    if (arg === "--cloud") {
+      options.runtime = "cloud";
+      continue;
+    }
+
+    if (arg === "--runtime") {
+      options.runtime = readOptionValue(argv, index, arg);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--runtime=")) {
+      options.runtime = arg.slice("--runtime=".length);
+      continue;
+    }
+
+    if (arg === "-C" || arg === "--cwd") {
+      options.cwd = readOptionValue(argv, index, arg);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--cwd=")) {
+      options.cwd = arg.slice("--cwd=".length);
+      continue;
+    }
+
+    if (arg === "-m" || arg === "--model") {
+      options.model = readOptionValue(argv, index, arg);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--model=")) {
+      options.model = arg.slice("--model=".length);
+      continue;
+    }
+
+    if (arg === "--name") {
+      options.name = readOptionValue(argv, index, arg);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--name=")) {
+      options.name = arg.slice("--name=".length);
+      continue;
+    }
+
+    if (arg === "--api-key") {
+      options.apiKey = readOptionValue(argv, index, arg);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--api-key=")) {
+      options.apiKey = arg.slice("--api-key=".length);
+      continue;
+    }
+
+    if (arg === "--repo") {
+      options.repo = readOptionValue(argv, index, arg);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--repo=")) {
+      options.repo = arg.slice("--repo=".length);
+      continue;
+    }
+
+    if (arg === "--ref" || arg === "--starting-ref") {
+      options.startingRef = readOptionValue(argv, index, arg);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--ref=")) {
+      options.startingRef = arg.slice("--ref=".length);
+      continue;
+    }
+
+    if (arg.startsWith("--starting-ref=")) {
+      options.startingRef = arg.slice("--starting-ref=".length);
+      continue;
+    }
+
+    if (arg === "--resume") {
+      options.resume = readOptionValue(argv, index, arg);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--resume=")) {
+      options.resume = arg.slice("--resume=".length);
+      continue;
+    }
+
+    if (arg === "--setting-sources") {
+      options.settingSources = readOptionValue(argv, index, arg);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--setting-sources=")) {
+      options.settingSources = arg.slice("--setting-sources=".length);
+      continue;
+    }
+
+    if (arg === "--force") {
+      options.force = true;
+      continue;
+    }
+
+    if (arg === "--json") {
+      options.json = true;
+      continue;
+    }
+
+    if (arg === "--plain") {
+      options.plain = true;
+      continue;
+    }
+
+    if (arg === "--show-thinking") {
+      options.showThinking = true;
+      continue;
+    }
+
+    if (arg === "--sandbox") {
+      options.sandbox = true;
+      continue;
+    }
+
+    if (arg === "--no-sandbox") {
+      options.sandbox = false;
+      continue;
+    }
+
+    if (arg === "--auto-pr") {
+      options.autoPr = true;
+      continue;
+    }
+
+    if (arg === "--work-on-current-branch") {
+      options.workOnCurrentBranch = true;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+
+    promptParts.push(arg, ...argv.slice(index + 1));
+    break;
+  }
+
+  options.cwd = path.resolve(options.cwd);
+  options.runtime = normalizeRuntime(options.runtime);
+  options.prompt = promptParts.join(" ").trim();
+
+  return options;
+}
+
+function normalizeRuntime(runtime) {
+  if (runtime === "local" || runtime === "cloud") {
+    return runtime;
+  }
+  throw new Error(`Unsupported runtime: ${runtime}. Expected local or cloud.`);
+}
+
+function readOptionValue(argv, index, option) {
+  const value = argv[index + 1];
+  if (!value || value.startsWith("-")) {
+    throw new Error(`Expected a value after ${option}.`);
+  }
+  return value;
+}
+
+function setupDependencies() {
+  mkdirSync(vendorDir, { recursive: true });
+  const packageJson = path.join(vendorDir, "package.json");
+
+  if (!existsSync(packageJson)) {
+    writeFileSync(
+      packageJson,
+      JSON.stringify(
+        {
+          private: true,
+          type: "module",
+          dependencies: {},
+        },
+        null,
+        2
+      ) + "\n"
+    );
+  }
+
+  const npm = findExecutable("npm");
+  if (!npm) {
+    throw new Error("npm was not found on PATH. Install Node.js 22 or newer first.");
+  }
+
+  const result = spawnSync(npm, ["install", "--prefix", vendorDir, SDK_PACKAGE], {
+    stdio: "inherit",
+  });
+
+  if (result.status !== 0) {
+    throw new Error(`npm install failed with exit code ${result.status ?? "unknown"}.`);
+  }
+
+  console.error(`[cursor-sdk] installed ${SDK_PACKAGE} in ${vendorDir}`);
+}
+
+function doctor() {
+  const nodeVersion = process.version;
+  const npm = findExecutable("npm") || "(missing)";
+  const sdkInfo = findInstalledSdk();
+  const apiKeyStatus = process.env.CURSOR_API_KEY ? "set" : "missing";
+
+  console.log("omacmux Cursor SDK doctor");
+  console.log(`node: ${nodeVersion}`);
+  console.log(`npm: ${npm}`);
+  console.log(`vendor: ${vendorDir}`);
+  console.log(`@cursor/sdk: ${sdkInfo ? `${sdkInfo.version} (${sdkInfo.source})` : "missing"}`);
+  console.log(`CURSOR_API_KEY: ${apiKeyStatus}`);
+
+  try {
+    const repo = detectCloudRepository(process.cwd(), {});
+    console.log(`cloud repo: ${formatCloudRepository(repo)}`);
+  } catch (error) {
+    console.log(`cloud repo: ${error.message}`);
+  }
+
+  if (!sdkInfo) {
+    console.log("");
+    console.log("Install SDK dependency with: omacmux-cursor-agent setup");
+  }
+}
+
+function findInstalledSdk() {
+  const candidates = sdkCandidates();
+  for (const candidate of candidates) {
+    const packageJson = path.join(candidate.base, "package.json");
+    if (!existsSync(packageJson)) {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(readFileSync(packageJson, "utf8"));
+      return { source: candidate.label, version: parsed.version || "unknown" };
+    } catch {
+      return { source: candidate.label, version: "unknown" };
+    }
+  }
+
+  return undefined;
+}
+
+async function loadCursorSdk() {
+  const errors = [];
+
+  for (const candidate of sdkCandidates()) {
+    if (!existsSync(candidate.entry)) {
+      continue;
+    }
+
+    try {
+      return await import(pathToFileURL(candidate.entry).href);
+    } catch (error) {
+      errors.push(`${candidate.label}: ${error.message}`);
+    }
+  }
+
+  try {
+    return await import("@cursor/sdk");
+  } catch (error) {
+    errors.push(`node resolver: ${error.message}`);
+  }
+
+  throw new Error(
+    [
+      "Could not load @cursor/sdk.",
+      `Run: ${path.basename(scriptPath)} setup`,
+      `Vendor directory: ${vendorDir}`,
+      errors.length ? `Resolver errors: ${errors.join(" | ")}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+}
+
+function sdkCandidates() {
+  return [
+    {
+      label: "repo",
+      base: path.join(repoRoot, "node_modules", "@cursor", "sdk"),
+      entry: path.join(repoRoot, "node_modules", "@cursor", "sdk", "dist", "esm", "index.js"),
+    },
+    {
+      label: "vendor",
+      base: path.join(vendorDir, "node_modules", "@cursor", "sdk"),
+      entry: path.join(
+        vendorDir,
+        "node_modules",
+        "@cursor",
+        "sdk",
+        "dist",
+        "esm",
+        "index.js"
+      ),
+    },
+  ];
+}
+
+async function listModels(Cursor, options) {
+  const apiKey = options.apiKey || process.env.CURSOR_API_KEY;
+  if (!apiKey) {
+    throw new Error("CURSOR_API_KEY is required to list Cursor models.");
+  }
+
+  const models = await Cursor.models.list({ apiKey });
+  for (const model of models) {
+    const variants = model.variants?.length
+      ? ` variants=${model.variants.map((variant) => variant.displayName).join(", ")}`
+      : "";
+    console.log(`${model.id}\t${model.displayName || model.id}${variants}`);
+  }
+}
+
+async function createAgent(Agent, options) {
+  if (options.resume) {
+    options.runtime = options.resume.startsWith("bc-") ? "cloud" : "local";
+
+    const resumeOptions = {
+      apiKey: options.apiKey,
+      model: { id: options.model },
+    };
+
+    if (options.runtime === "local") {
+      resumeOptions.local = buildLocalOptions(options);
+    }
+
+    const agent = await Agent.resume(options.resume, resumeOptions);
+    annotate(options, `[cursor-sdk] resumed ${agent.agentId}`);
+    return agent;
+  }
+
+  const base = {
+    apiKey: options.apiKey,
+    model: { id: options.model },
+    name: options.name,
+  };
+
+  if (options.runtime === "cloud") {
+    const repository = detectCloudRepository(options.cwd, options);
+    const cloud = {
+      repos: [repository],
+      autoCreatePR: options.autoPr,
+      workOnCurrentBranch: options.workOnCurrentBranch,
+    };
+
+    const agent = await Agent.create({ ...base, cloud });
+    annotate(options, `[cursor-sdk] cloud agent ${agent.agentId} ${formatCloudRepository(repository)}`);
+    return agent;
+  }
+
+  const agent = await Agent.create({
+    ...base,
+    local: buildLocalOptions(options),
+  });
+  annotate(options, `[cursor-sdk] local agent ${agent.agentId} cwd=${options.cwd}`);
+  return agent;
+}
+
+function buildLocalOptions(options) {
+  const local = { cwd: options.cwd };
+  const settingSources = parseSettingSources(options.settingSources);
+  if (settingSources) {
+    local.settingSources = settingSources;
+  }
+  if (options.sandbox !== undefined) {
+    local.sandboxOptions = { enabled: options.sandbox };
+  }
+  return local;
+}
+
+function parseSettingSources(raw) {
+  if (!raw || raw === "none" || raw === "false" || raw === "0") {
+    return undefined;
+  }
+
+  if (raw === "all") {
+    return ["all"];
+  }
+
+  return raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function sendPrompt(agent, prompt, options) {
+  const run = await agent.send(buildPrompt(prompt, options), {
+    ...(options.runtime === "local" && options.force ? { local: { force: true } } : {}),
+  });
+  activeRun = run;
+  annotate(options, `[cursor-sdk] run ${run.id}`);
+
+  try {
+    for await (const event of run.stream()) {
+      renderEvent(event, options);
+    }
+
+    const result = await run.wait();
+    renderResult(result, options);
+    return result;
+  } finally {
+    if (activeRun === run) {
+      activeRun = null;
+    }
+  }
+}
+
+function buildPrompt(prompt, options) {
+  if (options.plain) {
+    return prompt;
+  }
+
+  return [
+    "You are running inside omacmux through the Cursor SDK.",
+    "Work in the configured workspace. Preserve unrelated user changes.",
+    "Keep terminal progress concise and include concrete file paths or commands in summaries.",
+    "",
+    "User task:",
+    prompt,
+  ].join("\n");
+}
+
+function renderEvent(event, options) {
+  if (options.json) {
+    console.log(JSON.stringify(event));
+    return;
+  }
+
+  switch (event.type) {
+    case "assistant":
+      for (const block of event.message.content || []) {
+        if (block.type === "text") {
+          process.stdout.write(block.text);
+        } else if (block.type === "tool_use") {
+          annotate(
+            options,
+            `[tool] requested ${block.name}${summarizeArgs(block.name, block.input)}`
+          );
+        }
+      }
+      break;
+    case "thinking":
+      if (options.showThinking) {
+        annotate(options, `[thinking] ${compactText(event.text)}`);
+      }
+      break;
+    case "tool_call":
+      annotate(
+        options,
+        `[tool] ${event.status} ${event.name}${summarizeArgs(event.name, event.args)}`
+      );
+      break;
+    case "status":
+      if (event.status !== "FINISHED") {
+        annotate(
+          options,
+          `[status] ${event.status}${event.message ? ` ${event.message}` : ""}`
+        );
+      }
+      break;
+    case "task":
+      if (event.status || event.text) {
+        annotate(options, `[task] ${compactText([event.status, event.text].filter(Boolean).join(" "))}`);
+      }
+      break;
+    case "request":
+      annotate(options, `[request] awaiting input ${event.request_id}`);
+      break;
+    default:
+      break;
+  }
+}
+
+function renderResult(result, options) {
+  if (options.json) {
+    console.log(JSON.stringify({ type: "result", ...result }));
+    return;
+  }
+
+  const details = [`status=${result.status}`];
+  if (result.durationMs !== undefined) {
+    details.push(`duration=${formatDuration(result.durationMs)}`);
+  }
+  const branches = result.git?.branches || [];
+  for (const branch of branches) {
+    if (branch.prUrl) {
+      details.push(`pr=${branch.prUrl}`);
+    } else if (branch.branch) {
+      details.push(`branch=${branch.branch}`);
+    }
+  }
+  annotate(options, `[done] ${details.join(" ")}`);
+}
+
+async function runInteractive(sdk, options) {
+  let agent = await createAgent(sdk.Agent, options);
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: "cursor-sdk> ",
+  });
+
+  printInteractiveBanner(options, agent);
+  rl.prompt();
+
+  try {
+    for await (const line of rl) {
+      const input = line.trim();
+      if (!input) {
+        rl.prompt();
+        continue;
+      }
+
+      const handled = await handleSlashCommand(input, {
+        sdk,
+        get agent() {
+          return agent;
+        },
+        set agent(next) {
+          agent = next;
+        },
+        options,
+        rl,
+      });
+
+      if (!handled) {
+        await sendPrompt(agent, input, options);
+      }
+
+      rl.prompt();
+    }
+  } finally {
+    await disposeAgent(agent);
+  }
+}
+
+async function handleSlashCommand(input, context) {
+  if (!input.startsWith("/")) {
+    return false;
+  }
+
+  const [command, ...rest] = input.split(/\s+/);
+  const arg = rest.join(" ").trim();
+
+  switch (command) {
+    case "/help":
+      printInteractiveHelp();
+      return true;
+    case "/exit":
+    case "/quit":
+      context.rl.close();
+      return true;
+    case "/agent":
+      console.log(
+        `agent=${context.agent.agentId} runtime=${context.options.runtime} model=${context.options.model}`
+      );
+      return true;
+    case "/reset":
+      context.agent = await replaceAgent(context.sdk.Agent, context.agent, context.options);
+      return true;
+    case "/model":
+      if (!arg) {
+        console.log(`model=${context.options.model}`);
+      } else {
+        context.options.model = arg;
+        context.agent = await replaceAgent(context.sdk.Agent, context.agent, context.options);
+      }
+      return true;
+    case "/runtime":
+      if (!arg) {
+        console.log(`runtime=${context.options.runtime}`);
+      } else {
+        context.options.runtime = normalizeRuntime(arg);
+        context.agent = await replaceAgent(context.sdk.Agent, context.agent, context.options);
+      }
+      return true;
+    case "/force":
+      if (!arg) {
+        console.log(`force=${context.options.force}`);
+      } else {
+        context.options.force = ["1", "on", "true", "yes"].includes(arg.toLowerCase());
+        console.log(`force=${context.options.force}`);
+      }
+      return true;
+    case "/models":
+      await listModels(context.sdk.Cursor, context.options);
+      return true;
+    default:
+      console.log(`Unknown command: ${command}. Try /help.`);
+      return true;
+  }
+}
+
+async function replaceAgent(Agent, previousAgent, options) {
+  await disposeAgent(previousAgent);
+  return createAgent(Agent, options);
+}
+
+function printInteractiveBanner(options, agent) {
+  console.error(
+    `[cursor-sdk] interactive ${options.runtime} model=${options.model} agent=${agent.agentId}`
+  );
+  console.error("[cursor-sdk] /help for commands, /exit to quit");
+}
+
+function printInteractiveHelp() {
+  console.log(
+    [
+      "/help - show commands",
+      "/agent - show current agent id",
+      "/model [id] - show or switch model",
+      "/runtime [local|cloud] - show or switch runtime",
+      "/force [on|off] - expire stuck local run before next prompt",
+      "/models - list available Cursor models",
+      "/reset - start a fresh agent",
+      "/exit - quit",
+    ].join("\n")
+  );
+}
+
+async function disposeAgent(agent) {
+  if (!agent) {
+    return;
+  }
+
+  try {
+    await agent[Symbol.asyncDispose]();
+  } catch (error) {
+    console.error(`[cursor-sdk] dispose failed: ${error.message}`);
+  }
+}
+
+function detectCloudRepository(cwd, options) {
+  const explicitRepo = options.repo
+    ? normalizeGitHubRemote(options.repo) || options.repo
+    : undefined;
+  const url =
+    explicitRepo || normalizeGitHubRemote(runGit(cwd, ["config", "--get", "remote.origin.url"]));
+  if (!url) {
+    throw new Error("Cloud mode requires --repo or a GitHub remote.origin.url.");
+  }
+
+  const startingRef =
+    options.startingRef || normalizeStartingRef(runGit(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]));
+
+  return startingRef ? { url, startingRef } : { url };
+}
+
+function printCloudRepository(options) {
+  const repository = detectCloudRepository(options.cwd, options);
+  console.log(formatCloudRepository(repository));
+}
+
+function normalizeStartingRef(ref) {
+  if (!ref || ref === "HEAD") {
+    return undefined;
+  }
+  return ref;
+}
+
+function normalizeGitHubRemote(remote) {
+  if (!remote) {
+    return undefined;
+  }
+
+  const trimmed = remote.trim().replace(/\.git$/, "");
+  const sshMatch = trimmed.match(/^git@github\.com:(.+\/.+)$/);
+  const sshUrlMatch = trimmed.match(/^ssh:\/\/git@github\.com\/(.+\/.+)$/);
+  const httpsMatch = trimmed.match(/^https:\/\/github\.com\/(.+\/.+)$/);
+  const repoPath = sshMatch?.[1] || sshUrlMatch?.[1] || httpsMatch?.[1];
+  return repoPath ? `https://github.com/${repoPath}` : undefined;
+}
+
+function formatCloudRepository(repository) {
+  return repository.startingRef
+    ? `${repository.url}#${repository.startingRef}`
+    : repository.url;
+}
+
+function runGit(cwd, args) {
+  try {
+    return execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function summarizeArgs(toolName, args) {
+  if (!args || typeof args !== "object") {
+    return "";
+  }
+
+  const record = args;
+  const keys = getToolSummaryKeys(toolName);
+  const parts = [];
+
+  for (const group of keys) {
+    const part = summarizeFirstValue(record, group);
+    if (part) {
+      parts.push(part);
+    }
+  }
+
+  return parts.length ? ` ${parts.join(" ")}` : "";
+}
+
+function getToolSummaryKeys(toolName) {
+  const name = String(toolName).toLowerCase();
+
+  if (name.includes("read")) {
+    return [["path", "filePath", "target_file", "absolutePath"], ["offset"], ["limit"]];
+  }
+
+  if (name.includes("glob")) {
+    return [["pattern", "glob", "glob_pattern"], ["path", "cwd", "target_directory"]];
+  }
+
+  if (name.includes("grep") || name.includes("search")) {
+    return [["pattern", "query"], ["path"], ["glob"], ["type"]];
+  }
+
+  if (name.includes("shell") || name.includes("terminal") || name.includes("command")) {
+    return [["command", "cmd"], ["cwd", "working_directory"]];
+  }
+
+  if (name.includes("edit") || name.includes("write") || name.includes("patch")) {
+    return [["path", "target_file", "file"], ["instruction"]];
+  }
+
+  return [["path", "file", "target_file"], ["pattern", "query", "command"]];
+}
+
+function summarizeFirstValue(record, keys) {
+  for (const key of keys) {
+    const formatted = formatArgValue(record[key]);
+    if (formatted) {
+      return `${key}=${formatted}`;
+    }
+  }
+  return undefined;
+}
+
+function formatArgValue(value) {
+  if (typeof value === "string") {
+    return shorten(value.replace(/\s+/g, " ").trim());
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  if (Array.isArray(value)) {
+    const items = value.slice(0, 3).map(formatArgValue).filter(Boolean);
+    return items.length ? `[${items.join(",")}]` : undefined;
+  }
+
+  return undefined;
+}
+
+function shorten(value, maxLength = 96) {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`;
+}
+
+function compactText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function formatDuration(ms) {
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+function annotate(options, message) {
+  if (options.json) {
+    return;
+  }
+  process.stderr.write(`${message}\n`);
+}
+
+async function readStdin() {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  for await (const chunk of process.stdin) {
+    input += chunk;
+  }
+  return input;
+}
+
+function installSignalHandlers() {
+  process.on("SIGINT", async () => {
+    if (shuttingDown) {
+      process.exit(130);
+    }
+
+    if (!activeRun) {
+      process.exit(130);
+    }
+
+    shuttingDown = true;
+    try {
+      console.error("\n[cursor-sdk] cancelling active run...");
+      await activeRun.cancel();
+    } catch (error) {
+      console.error(`[cursor-sdk] cancel failed: ${error.message}`);
+    } finally {
+      process.exit(130);
+    }
+  });
+}
+
+function findExecutable(name) {
+  try {
+    return execFileSync("bash", ["-lc", `command -v ${shellQuote(name)}`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function printHelp() {
+  console.log(`omacmux-cursor-agent
+
+Cursor SDK wrapper for omacmux panes, layouts, and swarms.
+
+Usage:
+  omacmux-cursor-agent setup
+  omacmux-cursor-agent doctor
+  omacmux-cursor-agent models
+  omacmux-cursor-agent [options] ["prompt"]
+  echo "prompt" | omacmux-cursor-agent [options]
+
+Options:
+  --local | --cloud              Select local or Cursor cloud runtime
+  --runtime local|cloud          Same as above
+  -C, --cwd <dir>                Workspace directory (default: current dir)
+  -m, --model <id>               Cursor model id (default: ${DEFAULT_MODEL})
+  --name <name>                  Agent display name
+  --resume <agent-id>            Resume an existing local or cloud agent
+  --force                        Local only: expire a stuck active run first
+  --setting-sources <list>       Local config sources (default: ${DEFAULT_SETTING_SOURCES})
+  --sandbox | --no-sandbox       Set Cursor local sandbox option
+  --repo <url>                   Cloud repo URL (default: GitHub origin)
+  --ref <ref>                    Cloud starting ref (default: current branch)
+  --auto-pr                      Cloud: request PR creation on completion
+  --work-on-current-branch       Cloud: push to the starting branch
+  --plain                        Send the prompt without omacmux context
+  --show-thinking                Print SDK thinking events to stderr
+  --json                         Emit SDK events as JSON lines
+  -h, --help                     Show help
+
+Interactive commands:
+  /help, /agent, /model [id], /runtime [local|cloud], /force [on|off], /models,
+  /reset, /exit
+
+Environment:
+  CURSOR_API_KEY                 Required for SDK runs
+  CURSOR_MODEL                   Default model fallback
+  OMACMUX_CURSOR_MODEL           Overrides CURSOR_MODEL
+  OMACMUX_CURSOR_SETTING_SOURCES Default local setting sources
+  OMACMUX_CURSOR_SDK_HOME        Dependency install directory
+`);
+}
+
+main().catch((error) => {
+  console.error(`[cursor-sdk] ${error.message}`);
+  process.exitCode = 1;
+});

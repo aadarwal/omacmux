@@ -7,6 +7,7 @@ path_prepend() {
 }
 path_prepend "/opt/homebrew/bin"
 path_prepend "$HOME/.local/bin"
+path_prepend "$OMACMUX_PATH/bin"
 export PATH
 
 source "$OMACMUX_PATH/config/bash/envs"

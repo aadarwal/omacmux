@@ -16,6 +16,7 @@ brew "mise"                             # runtime version manager
 # Dev tools
 brew "gh"                               # GitHub CLI (git credential helper)
 brew "jq"                               # JSON processor
+brew "node"                             # Cursor SDK wrapper runtime
 brew "tree"                             # directory tree
 
 # Fonts (needed for terminal + nvim icons)

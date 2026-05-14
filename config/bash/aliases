@@ -33,6 +33,9 @@ alias cx='printf "\033[2J\033[3J\033[H" && claude --allow-dangerously-skip-permi
 alias cxx='printf "\033[2J\033[3J\033[H" && claude --dangerously-skip-permissions'
 alias cdx='printf "\033[2J\033[3J\033[H" && codex'
 alias cdxx='printf "\033[2J\033[3J\033[H" && codex --full-auto'
+alias cs='printf "\033[2J\033[3J\033[H" && omacmux-cursor-agent'
+alias csf='printf "\033[2J\033[3J\033[H" && omacmux-cursor-agent --force'
+alias csc='printf "\033[2J\033[3J\033[H" && omacmux-cursor-agent --cloud'
 alias d='docker'
 alias r='rails'
 unalias t 2>/dev/null

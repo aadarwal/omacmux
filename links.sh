@@ -21,6 +21,7 @@ OMACMUX_LINKS=(
   "additive:config/bash/inputrc:$HOME/.inputrc"
   "additive:shell/.hushlogin:$HOME/.hushlogin"
   "additive:config/bash/bin/swarm:$HOME/.local/bin/swarm"
+  "additive:bin/omacmux-cursor-agent:$HOME/.local/bin/omacmux-cursor-agent"
 )
 
 # Helper: parse a link entry into its components
