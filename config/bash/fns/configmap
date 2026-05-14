@@ -28,6 +28,7 @@ _cfgmap_entries() {
   printf "${blue}prompt${reset}\tstarship\t${p}/config/starship.toml\tPrompt theme and format\n"
   printf "${red}git${reset}\tgitconfig\t${p}/config/git/config\tGit settings, aliases, credentials\n"
   printf "${bcyan}ai${reset}\tclaude\t${p}/config/claude/settings.json\tClaude Code model and permissions\n"
+  printf "${bcyan}ai${reset}\tpi\t${p}/config/pi\tManaged Pi extensions and skills\n"
   printf "${bcyan}ai${reset}\tatlas\t${p}/config/atlas.json\tKnowledge base classifications\n"
   printf "${dim}system${reset}\tlinks\t${p}/links.sh\tSymlink manifest\n"
   printf "${dim}system${reset}\tbrewfile\t${p}/Brewfile\tHomebrew package dependencies\n"
@@ -62,7 +63,7 @@ cfgedit() {
     echo "Usage: cfgedit <name>"
     echo "Names: ghostty tmux session-bar bashrc aliases envs init inputrc"
     echo "       git worktree swarm mesh utils nvim starship gitconfig"
-    echo "       claude links brewfile install upgrade"
+    echo "       claude pi links brewfile install upgrade"
     return 1
   fi
 

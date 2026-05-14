@@ -254,9 +254,12 @@ Available agent commands (last arg to swarm):
 - cx    — Claude with basic permissions
 - cxx   — Claude with full YOLO permissions
 - claude — plain Claude
-- c     — Claude compact mode
-- cdx   — Claude with dangerously skip permissions
-- cdxx  — Claude with full dangerous YOLO
+- c     — OpenCode
+- cdx   — Codex
+- cdxx  — Codex full auto
+- pi    — Pi Coding Agent
+- pix   — Pi with all built-in tools enabled
+- pir   — Pi read-only mode
 
 Other available commands inside recipes:
 - swarm send agent-N \"message\"  — send a message to a specific agent

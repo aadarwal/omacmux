@@ -61,7 +61,7 @@ vibe stop      # tear it all down
 | Editor | [Neovim](https://neovim.io) + [LazyVim](https://www.lazyvim.org) |
 | Prompt | [Starship](https://starship.rs) |
 | Shell | Bash 5 + [eza](https://eza.rocks) + [fzf](https://junegunn.github.io/fzf/) + [zoxide](https://github.com/ajeetdsouza/zoxide) + [bat](https://github.com/sharkdp/bat) + [mise](https://mise.jdx.dev) |
-| AI | [Claude Code](https://claude.ai/code), [opencode](https://github.com/sst/opencode), [Codex](https://openai.com/index/codex/), or anything that runs in a terminal |
+| AI | [Claude Code](https://claude.ai/code), [opencode](https://github.com/sst/opencode), [Codex](https://openai.com/index/codex/), [Pi](https://pi.dev/), or anything that runs in a terminal |
 
 ---
 
@@ -204,7 +204,58 @@ The swarm system lets you orchestrate multiple AI agents across different topolo
 | `al [cmd]` | Launch agent in a new split pane (fzf picker) |
 | `alw [cmd]` | Launch agent in a new window |
 
-Available agent aliases: `cx` (Claude), `cxx` (Claude full-auto), `c` (OpenCode), `cdx` (Codex), `cdxx` (Codex full-auto).
+Available agent aliases: `cx` (Claude), `cxx` (Claude full-auto), `c` (OpenCode), `cdx` (Codex), `cdxx` (Codex full-auto), `pi` (Pi), `pix` (Pi with all built-in tools), `pir` (Pi read-only).
+
+### Pi Integration
+
+Pi fits omacmux best as another terminal-native agent:
+
+```bash
+tdl pi          # nvim + Pi + terminal
+tdl pix cdx     # Pi with all built-in tools + Codex
+tsl 4 pir       # four read-only Pi reviewers
+swarm wt 3 pix  # worktree-isolated Pi builders
+```
+
+The repo also includes a local Pi package:
+
+| Path | Purpose |
+|------|---------|
+| `config/pi/package.json` | Declares the `omacmux-pi` package resources |
+| `config/pi/extensions/omacmux-pi/index.ts` | Adds the `omacmux` bridge tool, `/omacmux` command, presets, and safety gates |
+| `config/pi/skills/omacmux/SKILL.md` | Teaches Pi the tmux, swarm, worktree, recipe, and review workflows |
+| `config/pi/prompts/` | Provides `/omacmux-swarm`, `/omacmux-worktree`, `/omacmux-review`, and `/omacmux-handoff` templates |
+| `docs/pi-integration.md` | Design notes for why omacmux uses CLI-first Pi integration instead of an SDK/RPC bridge by default |
+
+Install Pi separately if needed:
+
+```bash
+npm install -g @mariozechner/pi-coding-agent
+```
+
+`omacmux init` links the managed Pi extension, skill, and prompt templates into `~/.pi/agent/` when those target paths are free.
+
+You can also load the package directly:
+
+```bash
+pi -e ./config/pi
+```
+
+Inside Pi:
+
+```text
+/omacmux status
+/omacmux-preset scout
+/omacmux-preset builder
+/omacmux-swarm add automated smoke checks
+```
+
+Or start directly in a role:
+
+```bash
+pi --omacmux-preset scout
+pi --omacmux-preset conductor
+```
 
 ---
 
@@ -499,6 +550,9 @@ Connect to remote devices for distributed agent swarms.
 | `c` | OpenCode |
 | `cdx` | Codex |
 | `cdxx` | Codex (full auto) |
+| `pi` | Pi Coding Agent |
+| `pix` | Pi with all built-in tools |
+| `pir` | Pi read-only |
 | `n` | Neovim |
 | `g` | git |
 | `d` | docker |

@@ -11,6 +11,9 @@ claude	claude	Claude (default, interactive permissions)
 c	opencode	OpenCode
 cdx	codex	Codex
 cdxx	codex --full-auto	Codex (full auto)
+pi	pi	Pi Coding Agent
+pix	pi --tools read,bash,edit,write,grep,find,ls	Pi (all built-in tools)
+pir	pi --tools read,grep,find,ls	Pi (read-only)
 EOF
 }
 
